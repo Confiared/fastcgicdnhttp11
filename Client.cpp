@@ -507,7 +507,8 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         //if failed open cache
         if(cachefd==-1)
         {
-            std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
+            if(errno!=2)//if not file not found
+                std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
             if(Cache::hostsubfolder)
                 ::mkdir(("cache/"+folder).c_str(),S_IRWXU);
 
@@ -754,7 +755,8 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             #ifdef DEBUGFASTCGI
             std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
             #endif
-            std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
+            if(errno!=2)//if not file not found
+                std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
             if(Cache::hostsubfolder)
                 ::mkdir(("cache/"+folder).c_str(),S_IRWXU);
 
@@ -1125,7 +1127,8 @@ void Client::write(const char * const data,const int &size)
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
-        std::cerr << fd << ") error to write: " << errno << std::endl;
+        if(errno!=32)//if not BROKEN PIPE
+            std::cerr << fd << ") error to write: " << errno << std::endl;
         disconnect();
         return;
     }

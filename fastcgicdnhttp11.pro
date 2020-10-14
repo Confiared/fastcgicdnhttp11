@@ -18,12 +18,12 @@ contains(DEFINES, HTTPGZIP) {
 LIBS += -lz
 }
 
-DEFINES += DEBUGHTTPS
+#DEFINES += DEBUGHTTPS
 LIBS += -lssl -lcrypto
 
 CONFIG(debug, debug|release) {
-DEFINES += DEBUGFASTCGI
-DEFINES += DEBUGDNS
+#DEFINES += DEBUGFASTCGI
+#DEFINES += DEBUGDNS
 }
 
 SOURCES += main.cpp \

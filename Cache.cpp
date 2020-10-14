@@ -226,7 +226,7 @@ bool Cache::seekToContentPos()
             std::cerr << "Unable to seek setContentPos" << std::endl;
             return false;
         }
-        std::cout << "seek to:" << pos << std::endl;
+        //std::cout << "seek to:" << pos << std::endl;
         return true;
     }
     return false;

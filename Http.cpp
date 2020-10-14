@@ -42,10 +42,16 @@ Http::Http(const int &cachefd, //0 if no old cache file found
         abort();
     #endif
     if(cachefd==0)
+    {
+        #ifdef DEBUGFASTCGI
         std::cerr << "Http::Http()cachefd==0 then tempCache(nullptr): " << this << std::endl;
+        #endif
+    }
     else
     {
+        #ifdef DEBUGFASTCGI
         std::cerr << "Http::Http() cachefd!=0: " << this << std::endl;
+        #endif
         finalCache=new Cache(cachefd);
     }
     /*
@@ -91,7 +97,9 @@ bool Http::tryConnectInternal(const sockaddr_in6 &s)
 {
     bool connectInternal=false;
     backend=Backend::tryConnectHttp(s,this,connectInternal);
+    #ifdef DEBUGFASTCGI
     std::cerr << this << ": http->backend=" << backend << std::endl;
+    #endif
     return connectInternal;
 }
 
@@ -192,7 +200,9 @@ void Http::readyToRead()
     {
         const ssize_t size=socketRead(buffer+offset,sizeof(buffer)-offset);
         readSize=size;
+        #ifdef DEBUGFASTCGI
         std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
         if(size>0)
         {
             //std::cout << std::string(buffer,size) << std::endl;
@@ -232,7 +242,9 @@ void Http::readyToRead()
                                 if(!HttpReturnCode(http_code))
                                 {
                                     flushRead();
+                                    #ifdef DEBUGFASTCGI
                                     std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+                                    #endif
                                     return;
                                 }
                                 pos++;
@@ -245,7 +257,9 @@ void Http::readyToRead()
                 if(http_code!=200)
                 {
                     flushRead();
+                    #ifdef DEBUGFASTCGI
                     std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+                    #endif
                     return;
                 }
                 #ifdef DEBUGFASTCGI
@@ -412,7 +426,9 @@ void Http::readyToRead()
                                                 client->disconnect();
                                             }
                                             disconnectFrontend();
+                                            #ifdef DEBUGFASTCGI
                                             std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+                                            #endif
                                             return;
                                         }
                                     }
@@ -421,7 +437,9 @@ void Http::readyToRead()
                                         std::cerr << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
                                         //return internal error
                                         disconnectFrontend();
+                                        #ifdef DEBUGFASTCGI
                                         std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+                                        #endif
                                         return;
                                     }
                                 }
@@ -626,7 +644,9 @@ void Http::readyToRead()
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
     } while(readSize>0);
+    #ifdef DEBUGFASTCGI
     std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif
 }
 
 void Http::readyToWrite()
@@ -767,7 +787,9 @@ void Http::parseNonHttpError(const Backend::NonHttpError &error)
 
 void Http::disconnectBackend()
 {
+    #ifdef DEBUGFASTCGI
     std::cerr << "Http::disconnectBackend() " << this << std::endl;
+    #endif
 
     if(finalCache!=nullptr)
         finalCache->close();

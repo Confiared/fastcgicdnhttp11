@@ -11,9 +11,7 @@
 
 class Http;
 
-//to debug
-#define MAXBACKEND 1
-//#define MAXBACKEND 3
+#define MAXBACKEND 3
 
 class Backend : public EpollObject
 {

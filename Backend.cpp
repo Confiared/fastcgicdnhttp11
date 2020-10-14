@@ -41,7 +41,9 @@ Backend::~Backend()
     }
     if(http!=nullptr)
     {
+        #ifdef DEBUGFASTCGI
         std::cerr << http << ": http->backend=nullptr; (destructor)" << std::endl;
+        #endif
         http->backend=nullptr;
         http=nullptr;
     }
@@ -237,7 +239,9 @@ void Backend::downloadFinished()
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
+        #ifdef DEBUGFASTCGI
         std::cerr << "Backend::downloadFinished() NOT TRY AGAIN" << std::endl;
+        #endif
         http->backend=nullptr;
         return;
     }
@@ -257,7 +261,9 @@ void Backend::downloadFinished()
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
         backendList->idle.push_back(this);
+        #ifdef DEBUGFASTCGI
         std::cerr << this << " backend, " << http << ": http->backend=null + http=nullptr" << std::endl;
+        #endif
         http->backend=nullptr;
         http=nullptr;
     }
@@ -265,8 +271,8 @@ void Backend::downloadFinished()
     {
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
-        #endif
         std::cerr << http << ": http->backend=null and !backendList->pending.empty()" << std::endl;
+        #endif
         http->backend=nullptr;
         http=nullptr;
         bool haveFound=false;
@@ -401,7 +407,9 @@ void Backend::startHttps()
         std::cerr << "Backend::startHttps(): ssl!=nullptr at start" << std::endl;
         abort();
     }
+    #ifdef DEBUGFASTCGI
     std::cerr << "Backend::startHttps(): " << this << std::endl;
+    #endif
     /* ------------ */
     /* Init openssl */
     SSL_load_error_strings();
@@ -494,7 +502,9 @@ void Backend::startHttps()
             #ifdef DEBUGHTTPS
             dump_cert_info(ssl, false);
             #else
+            #ifdef DEBUGFASTCGI
             std::cerr << "problem with certificate" << std::endl;
+            #endif
             #endif
             break;
         }
@@ -626,13 +636,17 @@ void Backend::parseEvent(const epoll_event &event)
 {
     if(event.events & EPOLLIN)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLIN" << std::endl;
+        #endif
         if(http!=nullptr)
             http->readyToRead();
     }
     if(event.events & EPOLLOUT)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLOUT" << std::endl;
+        #endif
         if(ssl==nullptr && https)
             startHttps();
         if(http!=nullptr)
@@ -641,23 +655,31 @@ void Backend::parseEvent(const epoll_event &event)
 
     if(event.events & EPOLLHUP)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLHUP" << std::endl;
+        #endif
         remoteSocketClosed();
         //do client reject
     }
     if(event.events & EPOLLRDHUP)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLRDHUP" << std::endl;
+        #endif
         remoteSocketClosed();
     }
     if(event.events & EPOLLET)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLET" << std::endl;
+        #endif
         remoteSocketClosed();
     }
     if(event.events & EPOLLERR)
     {
+        #ifdef DEBUGFASTCGI
         std::cout << "EPOLLERR" << std::endl;
+        #endif
         remoteSocketClosed();
     }
 }
@@ -701,8 +723,8 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
         }
         #ifdef DEBUGFASTCGI
         std::cout << "Socket byte read: " << readen << std::endl;
-        #endif
         std::cerr << "Client Received " << readen << " chars - '" << std::string((char *)buffer,readen) << "'" << std::endl;
+        #endif
 
         if (readen <= 0) {
             if(readen == SSL_ERROR_WANT_READ ||
@@ -754,7 +776,9 @@ bool Backend::socketWrite(const void *buffer, size_t size)
     ssize_t sizeW=-1;
     if(ssl!=nullptr)
     {
+        #ifdef DEBUGFASTCGI
         std::cerr << "Client Send " << size << " chars - '" << std::string((char *)buffer,size) << "'" << std::endl;
+        #endif
         int writenSize = SSL_write(ssl, buffer,size);
         if (writenSize==-1)
         {
@@ -790,14 +814,17 @@ bool Backend::socketWrite(const void *buffer, size_t size)
     {
         if((size_t)sizeW<size)
         {
+            #ifdef DEBUGFASTCGI
             std::cerr << "sizeW only: " << sizeW << std::endl;
+            #endif
             this->bufferSocket+=std::string((char *)buffer+sizeW,size-sizeW);
         }
         return true;
     }
     else
     {
-        std::cerr << "Http socket errno:" << errno << std::endl;
+        if(errno!=32)//if not broken pipe
+            std::cerr << "Http socket errno:" << errno << std::endl;
         return false;
     }
 }

@@ -24,7 +24,8 @@
 #define MAX_EVENTS 1024
 
 void signal_callback_handler(int signum) {
-    printf("Caught signal SIGPIPE %d\n",signum);
+    (void)signum;
+    //printf("Caught signal SIGPIPE %d\n",signum);
 }
 
 int main(int argc, char *argv[])
