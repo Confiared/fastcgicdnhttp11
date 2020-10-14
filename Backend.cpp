@@ -79,7 +79,9 @@ void Backend::remoteSocketClosed()
     #endif
     if(fd!=-1)
     {
+        #ifdef DEBUGFASTCGI
         std::cerr << "EPOLL_CTL_DEL remoteSocketClosed Http: " << fd << std::endl;
+        #endif
         if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL)==-1)
             std::cerr << "EPOLL_CTL_DEL remoteSocketClosed Http: " << fd << ", errno: " << errno << std::endl;
         ::close(fd);
@@ -153,7 +155,9 @@ void Backend::remoteSocketClosed()
                             backendList->idle.pop_back();
                             backendList->busy.push_back(backend);
                             backend->http=http;
+                            #ifdef DEBUGFASTCGI
                             std::cerr << http << ": http->backend=" << backend << std::endl;
+                            #endif
                             http->backend=backend;
                             http->readyToWrite();
                         }
@@ -165,7 +169,9 @@ void Backend::remoteSocketClosed()
                                 //todo abort client
                                 return;
                             newBackend->http=http;
+                            #ifdef DEBUGFASTCGI
                             std::cerr << http << ": http->backend=" << newBackend << std::endl;
+                            #endif
                             http->backend=newBackend;
 
                             backendList->busy.push_back(newBackend);
@@ -344,7 +350,9 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
             list->idle.pop_back();
             list->busy.push_back(backend);
             backend->http=http;
+            #ifdef DEBUGFASTCGI
             std::cerr << http << ": http->backend=" << backend << std::endl;
+            #endif
             http->backend=backend;
             http->readyToWrite();
             return backend;
@@ -360,7 +368,9 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
                     return nullptr;
                 }
                 newBackend->http=http;
+                #ifdef DEBUGFASTCGI
                 std::cerr << http << ": http->backend=" << newBackend << std::endl;
+                #endif
                 http->backend=newBackend;
 
                 list->busy.push_back(newBackend);
@@ -385,7 +395,9 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
             return nullptr;
         }
         newBackend->http=http;
+        #ifdef DEBUGFASTCGI
         std::cerr << http << ": http->backend=" << newBackend << std::endl;
+        #endif
         http->backend=newBackend;
 
         list->busy.push_back(newBackend);

@@ -8,6 +8,6 @@ DNSCache::DNSCache()
 
 void DNSCache::exec()
 {
-    std::cout << "Clean DNS cache" << std::endl;
+    //std::cout << "Clean DNS cache" << std::endl;
     Dns::dns->cleanCache();
 }

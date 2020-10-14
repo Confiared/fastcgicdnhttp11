@@ -730,7 +730,9 @@ bool Http::HttpReturnCode(const int &errorCode)
         return true;
     if(errorCode==304) //when have header 304 Not Modified
     {
-        std::cout << http_code << " http code!, cache already good" << std::endl;
+        #ifdef DEBUGFASTCGI
+        std::cout << "304 http code!, cache already good" << std::endl;
+        #endif
         finalCache->set_last_modification_time_check(time(NULL));
         //send file to listener
         for(Client * client : clientsList)
@@ -815,8 +817,8 @@ void Http::disconnectBackend()
         std::cerr << this << ": backend->http==this, backend: " << backend << std::endl;
         abort();
     }
-    #endif
     std::cerr << this << ": backend=nullptr" << std::endl;
+    #endif
     backend=nullptr;
 
     host.clear();

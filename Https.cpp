@@ -12,7 +12,9 @@ bool Https::tryConnectInternal(const sockaddr_in6 &s)
 {
     bool connectInternal=false;
     backend=Backend::tryConnectHttps(s,this,connectInternal);
+    #ifdef DEBUGFASTCGI
     std::cerr << this << ": http->backend=" << backend << std::endl;
+    #endif
     return connectInternal;
 }
 
