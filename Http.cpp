@@ -285,7 +285,9 @@ void Http::readyToRead()
                                 {
                                     parsing=Parsing_ETag;
                                     pos++;
-                                    std::cout << "content-length" << std::endl;
+                                    #ifdef DEBUGFASTCGI
+                                    std::cout << "get backend etag" << std::endl;
+                                    #endif
                                 }
                                 else
                                 {
@@ -303,7 +305,9 @@ void Http::readyToRead()
                                 {
                                     parsing=Parsing_ContentEncoding;
                                     pos++;
-                                    std::cout << "content-encoding" << std::endl;
+                                    #ifdef DEBUGFASTCGI
+                                    std::cout << "get backend content-encoding" << std::endl;
+                                    #endif
                                 }
                                 else
                                 {
@@ -321,7 +325,9 @@ void Http::readyToRead()
                                 {
                                     parsing=Parsing_ContentLength;
                                     pos++;
-                                    std::cout << "content-length" << std::endl;
+                                    #ifdef DEBUGFASTCGI
+                                    std::cout << "get backend content-length" << std::endl;
+                                    #endif
                                 }
                                 else
                                 {
@@ -338,7 +344,9 @@ void Http::readyToRead()
                                 {
                                     parsing=Parsing_ContentType;
                                     pos++;
-                                    std::cout << "content-type" << std::endl;
+                                    #ifdef DEBUGFASTCGI
+                                    std::cout << "get backend content-type" << std::endl;
+                                    #endif
                                 }
                                 else
                                 {
@@ -369,7 +377,9 @@ void Http::readyToRead()
                             if(pos==pos2 && parsing==Parsing_HeaderVar)
                             {
                                 //end of header
+                                #ifdef DEBUGFASTCGI
                                 std::cout << "end of header" << std::endl;
+                                #endif
                                 parsing=Parsing_Content;
                                 if(c=='\r')
                                 {
@@ -400,9 +410,11 @@ void Http::readyToRead()
                                     tempCache=nullptr;
                                     delete tempCache;
                                 }
-                                int cachefd=-1;
-                                std::cerr << "open((cachePath+.tmp).c_str() " << (cachePath+".tmp") << std::endl;
-                                if((cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))==-1)
+                                #ifdef DEBUGFASTCGI
+                                std::cout << "open((cachePath+.tmp).c_str() " << (cachePath+".tmp") << std::endl;
+                                #endif
+                                int cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                                if(cachefd==-1)
                                 {
                                     if(errno==2)
                                     {
@@ -413,9 +425,12 @@ void Http::readyToRead()
                                             const std::string basePath=cachePath.substr(0,n);
                                             mkdir(basePath.c_str(),S_IRWXU);
                                         }
-                                        if((cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))==-1)
+                                        cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                                        if(cachefd==-1)
                                         {
-                                            std::cerr << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
+                                            #ifdef DEBUGFASTCGI
+                                            std::cout << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
+                                            #endif
                                             //return internal error
                                             for(Client * client : clientsList)
                                             {
@@ -431,10 +446,18 @@ void Http::readyToRead()
                                             #endif
                                             return;
                                         }
+                                        else
+                                        {
+                                            #ifdef DEBUGFILEOPEN
+                                            std::cerr << "Http::readyToRead() open: " << cachePath << ", fd: " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                                            #endif
+                                        }
                                     }
                                     else
                                     {
-                                        std::cerr << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
+                                        #ifdef DEBUGFASTCGI
+                                        std::cout << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
+                                        #endif
                                         //return internal error
                                         disconnectFrontend();
                                         #ifdef DEBUGFASTCGI
@@ -442,6 +465,12 @@ void Http::readyToRead()
                                         #endif
                                         return;
                                     }
+                                }
+                                else
+                                {
+                                    #ifdef DEBUGFILEOPEN
+                                    std::cerr << "Http::readyToRead() open: " << cachePath << ", fd: " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                                    #endif
                                 }
 
                                 tempCache=new Cache(cachefd);
@@ -506,7 +535,9 @@ void Http::readyToRead()
                                         "ETag: \""+r+"\"\n"
                                         "Access-Control-Allow-Origin: *\n";
                                 }
+                                #ifdef DEBUGFASTCGI
                                 std::cout << "header: " << header << std::endl;
+                                #endif
                                 header+="\n";
                                 tempCache->seekToContentPos();
                                 if(tempCache->write(header.data(),header.size())!=(ssize_t)header.size())
@@ -535,7 +566,9 @@ void Http::readyToRead()
                                         std::istringstream iss(std::string(buffer+pos2,pos-pos2));
                                         iss >> value64;
                                         contentsize=value64;
+                                        #ifdef DEBUGFASTCGI
                                         std::cout << "content-length: " << value64 << std::endl;
+                                        #endif
                                     }
                                     break;
                                     case Parsing_ContentType:
@@ -704,15 +737,17 @@ void Http::disconnectFrontend()
     #ifdef DEBUGFASTCGI
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     if(cachePath.empty())
-        abort();
-    std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
-    if(pathToHttp.find(cachePath)==pathToHttp.cend())
+        std::cerr << "cachePath.empty()" << std::endl;
+    else
     {
-        std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
-        abort();
+        std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+        if(pathToHttp.find(cachePath)==pathToHttp.cend())
+            std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
     }
     #endif
-    pathToHttp.erase(cachePath);
+    if(!cachePath.empty())
+        if(pathToHttp.find(cachePath)!=pathToHttp.cend())
+            pathToHttp.erase(cachePath);
 
     contenttype.clear();
     url.clear();
@@ -733,10 +768,16 @@ bool Http::HttpReturnCode(const int &errorCode)
         #ifdef DEBUGFASTCGI
         std::cout << "304 http code!, cache already good" << std::endl;
         #endif
-        finalCache->set_last_modification_time_check(time(NULL));
+        if(finalCache!=nullptr)
+            finalCache->set_last_modification_time_check(time(NULL));
         //send file to listener
         for(Client * client : clientsList)
+        {
+            #ifdef DEBUGFASTCGI
+            std::cout << "send file to listener: " << client << std::endl;
+            #endif
             client->startRead(cachePath,false);
+        }
         return false;
     }
     const std::string &errorString("Http "+std::to_string(errorCode));
@@ -793,10 +834,16 @@ void Http::disconnectBackend()
     std::cerr << "Http::disconnectBackend() " << this << std::endl;
     #endif
 
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Http::disconnectBackend() post, finalCache close: " << finalCache << std::endl;
+    #endif
     if(finalCache!=nullptr)
         finalCache->close();
     const char * const cstr=cachePath.c_str();
     //todo, optimise with renameat2(RENAME_EXCHANGE) if --flatcache + destination
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Http::disconnectBackend() post, tempCache close: " << tempCache << std::endl;
+    #endif
     if(tempCache!=nullptr)
     {
         tempCache->close();
@@ -831,14 +878,14 @@ void Http::disconnectBackend()
 void Http::addClient(Client * client)
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " add client: " << client << std::endl;
     if(cachePath.empty())
-        abort();
-    std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
-    if(pathToHttp.find(cachePath)==pathToHttp.cend())
+        std::cerr << "cachePath.empty()" << std::endl;
+    else
     {
-        std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
-        abort();
+        std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+        if(pathToHttp.find(cachePath)==pathToHttp.cend())
+            std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
     }
     #endif
     if(host.empty() || uri.empty())
@@ -849,6 +896,21 @@ void Http::addClient(Client * client)
         client->httpError("Add client to dead http url downloader");
         return;
     }
+
+    //drop performance, but more secure, remove when more stable
+    size_t i=0;
+    while(i<clientsList.size())
+    {
+        if(clientsList.at(i)==client)
+        {
+            #ifdef DEBUGFASTCGI
+            std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " dual addClient detected: " << client << std::endl;
+            #endif
+            return;
+        }
+        i++;
+    }
+
     clientsList.push_back(client);
     #ifdef DEBUGFASTCGI
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
@@ -861,21 +923,34 @@ void Http::addClient(Client * client)
     // can be without backend asigned due to max backend
 }
 
-void Http::removeClient(Client * client)
+bool Http::removeClient(Client * client)
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client: " << client << std::endl;
     #endif
+    //some drop performance at exchange of bug prevent
     size_t i=0;
+    size_t itemDropped=0;
     while(i<clientsList.size())
     {
         if(clientsList.at(i)==client)
         {
             clientsList.erase(clientsList.cbegin()+i);
-            break;
+            itemDropped++;
+            //return true;
         }
-        i++;
+        else
+            i++;
     }
+    //return false;
+    #ifdef DEBUGFASTCGI
+    if(itemDropped!=1)
+        std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client failed: " << client << ", itemDropped: " << itemDropped << std::endl;
+    #endif
+    return itemDropped==1;
+
+
+    //std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " failed to remove: " << client << std::endl;
     /*auto p=std::find(clientsList.cbegin(),clientsList.cend(),client);
     if(p!=clientsList.cend())
         clientsList.erase(p);*/

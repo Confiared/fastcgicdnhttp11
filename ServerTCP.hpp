@@ -1,17 +1,17 @@
-#ifndef SERVER_H
-#define SERVER_H
+#ifndef SERVERTCP_H
+#define SERVERTCP_H
 
+#ifdef DEBUGFASTCGITCP
 #include "EpollObject.hpp"
 
-class Server : public EpollObject
+class ServerTCP : public EpollObject
 {
 public:
-    Server(const char * const path);
+    ServerTCP(const char* const ip,const char* const port);
     void parseEvent(const epoll_event &) override;
-#ifdef DEBUGFASTCGITCP
 private:
     bool tryListenInternal(const char* const ip,const char* const port);
-#endif
 };
+#endif
 
 #endif // SERVER_H

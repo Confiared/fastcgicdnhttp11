@@ -18,6 +18,7 @@ public:
         Kind_Dns,
         Kind_Timer,
         Kind_Cache,
+        Kind_ServerTCP,
     };
     virtual void parseEvent(const epoll_event &event) = 0;
     const Kind &getKind() const;

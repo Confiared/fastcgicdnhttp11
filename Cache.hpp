@@ -3,7 +3,6 @@
 
 #include "EpollObject.hpp"
 
-#include <curl/curl.h>
 #include <string>
 
 class Cache;

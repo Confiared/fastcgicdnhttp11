@@ -1,6 +1,9 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include "Server.hpp"
+#ifdef DEBUGFASTCGITCP
+#include "ServerTCP.hpp"
+#endif
 #include "Client.hpp"
 #include "Http.hpp"
 #include "Dns.hpp"
@@ -37,7 +40,7 @@ int main(int argc, char *argv[])
         abort();
     }
     mkdir("cache", S_IRWXU);
-
+    Backend::https_portBE=be16toh(443);
 
     std::vector <std::string> sources;
     for (int i = 1; i < argc; ++i) {
@@ -99,6 +102,9 @@ int main(int argc, char *argv[])
 
     /*Server *server=*///new Server("/run/fastcgicdn.sock");
     Server s("fastcgicdn.sock");
+    #ifdef DEBUGFASTCGITCP
+    ServerTCP sTcp("127.0.0.1","5556");
+    #endif
     (void)s;
     std::vector<Client *> newDeleteClient,oldDeleteClient;
     std::vector<Backend *> newDeleteBackend,oldDeleteBackend;
@@ -158,6 +164,14 @@ int main(int argc, char *argv[])
                     static_cast<Timer *>(e.data.ptr)->validateTheTimer();
                 }
                 break;
+                #ifdef DEBUGFASTCGITCP
+                case EpollObject::Kind::Kind_ServerTCP:
+                {
+                    ServerTCP * serverTcp=static_cast<ServerTCP *>(e.data.ptr);
+                    serverTcp->parseEvent(e);
+                }
+                break;
+                #endif
                 default:
                 break;
             }

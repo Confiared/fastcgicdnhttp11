@@ -47,6 +47,9 @@ void Cache::parseEvent(const epoll_event &event)
 
 void Cache::close()
 {
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Cache::close(), fd: " << fd << std::endl;
+    #endif
     if(fd!=-1)
     {
         epoll_ctl(epollfd,EPOLL_CTL_DEL, fd, NULL);

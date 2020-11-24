@@ -48,6 +48,7 @@ public:
     static void dump_cert_info(SSL *ssl, bool server);
     #endif
 public:
+    static uint16_t https_portBE;
     Http *http;
     bool https;
     bool wasTCPConnected;

@@ -33,7 +33,7 @@ public:
     int write(const char * const data, const size_t &size, bool &endDetected);
     static std::string timestampsToHttpDate(const int64_t &time);
     void addClient(Client * client);
-    void removeClient(Client * client);
+    bool removeClient(Client * client);
     const std::string &getCachePath() const;
     void resetRequestSended();
     bool haveUrlAndFrontendConnected();

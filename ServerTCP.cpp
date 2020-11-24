@@ -1,4 +1,5 @@
-#include "Server.hpp"
+#ifdef DEBUGFASTCGITCP
+#include "ServerTCP.hpp"
 #include "Client.hpp"
 #include "Dns.hpp"
 #include <sys/socket.h>
@@ -12,9 +13,9 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-Server::Server(const char *const path)
+ServerTCP::ServerTCP(const char* const ip,const char* const port)
 {
-    this->kind=EpollObject::Kind::Kind_Server;
+    this->kind=EpollObject::Kind::Kind_ServerTCP;
 
     if((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
     {
@@ -22,54 +23,11 @@ Server::Server(const char *const path)
         abort();
     }
 
-    #ifndef DEBUGFASTCGITCP
-    struct sockaddr_un local;
-    local.sun_family = AF_UNIX;
-    strcpy(local.sun_path,path);
-    unlink(local.sun_path);
-    int len = strlen(local.sun_path) + sizeof(local.sun_family);
-    if(bind(fd, (struct sockaddr *)&local, len)!=0)
-    {
-        std::cerr << "Can't bind the unix socket, error (errno): " << errno << std::endl;
+    if(!tryListenInternal(ip,port))
         abort();
-    }
-
-    if(listen(fd, 4096) == -1)
-    {
-        std::cerr << "Unable to listen, error (errno): " << errno << std::endl;
-        abort();
-    }
-
-    int flags, s;
-    flags = fcntl(fd, F_GETFL, 0);
-    if(flags == -1)
-        std::cerr << "fcntl get flags error" << std::endl;
-    else
-    {
-        flags |= O_NONBLOCK;
-        s = fcntl(fd, F_SETFL, flags);
-        if(s == -1)
-            std::cerr << "fcntl set flags error" << std::endl;
-    }
-
-    epoll_event event;
-    event.data.ptr = this;
-    event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-    //std::cerr << "EPOLL_CTL_ADD: " << fd << std::endl;
-    if(epoll_ctl(epollfd,EPOLL_CTL_ADD, fd, &event) == -1)
-    {
-        std::cerr << "epoll_ctl failed to add server: " << errno << std::endl;
-        abort();
-    }
-    #else
-    (void)path;
-    if(!tryListenInternal("127.0.0.1","5556"))
-        abort();
-    #endif
 }
 
-#ifdef DEBUGFASTCGITCP
-bool Server::tryListenInternal(const char* const ip,const char* const port)
+bool ServerTCP::tryListenInternal(const char* const ip,const char* const port)
 {
     if(strlen(port)==0)
     {
@@ -201,9 +159,8 @@ bool Server::tryListenInternal(const char* const ip,const char* const port)
     freeaddrinfo (result);
     return bindSuccess>0;
 }
-#endif
 
-void Server::parseEvent(const epoll_event &)
+void ServerTCP::parseEvent(const epoll_event &)
 {
     while(1)
     {
@@ -250,4 +207,4 @@ void Server::parseEvent(const epoll_event &)
         }
     }
 }
-
+#endif

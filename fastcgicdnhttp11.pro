@@ -22,8 +22,10 @@ LIBS += -lz
 LIBS += -lssl -lcrypto
 
 CONFIG(debug, debug|release) {
-#DEFINES += DEBUGFASTCGI
-#DEFINES += DEBUGDNS
+DEFINES += DEBUGFASTCGI
+DEFINES += DEBUGDNS
+DEFINES += DEBUGFILEOPEN
+#DEFINES += DEBUGFASTCGITCP
 }
 
 SOURCES += main.cpp \
@@ -34,6 +36,7 @@ SOURCES += main.cpp \
     Http.cpp \
     Https.cpp \
     Server.cpp \
+    ServerTCP.cpp \
     Dns.cpp \
     Timer.cpp \
     Cache.cpp \
@@ -48,6 +51,7 @@ HEADERS += \
     Http.hpp \
     Https.hpp \
     Server.hpp \
+    ServerTCP.hpp \
     Dns.hpp \
     Timer.hpp \
     Cache.hpp \

@@ -14,7 +14,7 @@
 std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttp;
 std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttps;
 
-static uint16_t https_portBE=be16toh(443);
+uint16_t Backend::https_portBE=0;
 
 Backend::Backend(BackendList * backendList) :
     http(nullptr),
@@ -76,6 +76,9 @@ void Backend::remoteSocketClosed()
 {
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Backend::remoteSocketClosed(), fd: " << fd << std::endl;
     #endif
     if(fd!=-1)
     {
@@ -506,6 +509,9 @@ void Backend::startHttps()
                 meth=nullptr;
                 ctx=nullptr;
                 ssl=nullptr;
+                #ifdef DEBUGFILEOPEN
+                std::cerr << "Backend::startHttps(), fd: " << fd << std::endl;
+                #endif
                 close(fd);
                 return;
             }

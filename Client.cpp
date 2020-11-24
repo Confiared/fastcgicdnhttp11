@@ -40,7 +40,10 @@ Client::Client(int cfd) :
 Client::~Client()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << " destructor" << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " destructor " << this << std::endl;
+    #endif
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Client::~Client(), readCache close: " << readCache << std::endl;
     #endif
     if(readCache!=nullptr)
     {
@@ -48,8 +51,16 @@ Client::~Client()
         delete readCache;
         readCache=nullptr;
     }
-    if(http)
-        http->removeClient(this);
+    if(http!=nullptr)
+    {
+        if(!http->removeClient(this))
+        {
+            #ifdef DEBUGFASTCGI
+            std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+            #endif
+        }
+        http=nullptr;
+    }
 }
 
 void Client::parseEvent(const epoll_event &event)
@@ -65,7 +76,10 @@ void Client::parseEvent(const epoll_event &event)
 void Client::disconnect()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
+    #endif
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Client::disconnect(), readCache close: " << fd << std::endl;
     #endif
     if(fd!=-1)
     {
@@ -79,8 +93,16 @@ void Client::disconnect()
             std::cerr << this << " " << fd << " disconnect() failed: " << errno << std::endl;
         fd=-1;
     }
-    if(http)
-        http->removeClient(this);
+    if(http!=nullptr)
+    {
+        if(!http->removeClient(this))
+        {
+            #ifdef DEBUGFASTCGI
+            std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+            #endif
+        }
+        http=nullptr;
+    }
     dataToWrite.clear();
     if(status==Status_WaitDns)
         Dns::dns->cancelClient(this,host,https);
@@ -90,12 +112,12 @@ void Client::disconnect()
 void Client::readyToRead()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(fullyParsed)
         return;
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
 
     char buff[4096];
@@ -126,7 +148,7 @@ void Client::readyToRead()
         if(var8!=1)
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             disconnect();
             return;
@@ -141,7 +163,7 @@ void Client::readyToRead()
             if(var8!=1)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 disconnect();
                 return;
@@ -158,7 +180,7 @@ void Client::readyToRead()
             if(var8!=4 && var8!=5)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 disconnect();
                 return;
@@ -168,7 +190,7 @@ void Client::readyToRead()
             if(fastcgiid!=var16)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 disconnect();
                 return;
@@ -300,7 +322,7 @@ void Client::readyToRead()
     if(!fullyParsed)
         return;
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
 
     //check if robots.txt
@@ -436,7 +458,7 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         std::cout << "downloading: http://" << host << uri << std::endl;*/
 
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
 
     if(host.empty())
@@ -448,7 +470,7 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
     }
 
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     status=Status_WaitTheContent;
     partial=false;
@@ -487,9 +509,19 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
     if(Http::pathToHttp.find(path)!=Http::pathToHttp.cend())
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
-        Http *http=Http::pathToHttp.at(path);
+        if(http!=nullptr)
+        {
+            if(!http->removeClient(this))
+            {
+                #ifdef DEBUGFASTCGI
+                std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+                #endif
+            }
+            http=nullptr;
+        }
+        http=Http::pathToHttp.at(path);
         http->addClient(this);//into this call, start open cache and stream if partial have started
     }
     else
@@ -524,8 +556,11 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         }
         else
         {
+            #ifdef DEBUGFILEOPEN
+            std::cerr << "Client::loadUrl() open: " << path << ", fd: " << cachefd << ", " << url << std::endl;
+            #endif
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             if(!ifNoneMatch.empty())
             {
@@ -538,9 +573,12 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                         char text[]="Status: 304 Not Modified\r\n\r\n";
                         writeOutput(text,sizeof(text)-1);
                         writeEnd();
+                        #ifdef DEBUGFILEOPEN
+                        std::cerr << "Client::loadUrl(), readCache close: " << cachefd << std::endl;
+                        #endif
                         ::close(cachefd);
                         #ifdef DEBUGFASTCGI
-                        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                         #endif
                         return;
                     }
@@ -548,7 +586,7 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
             }
 
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             uint64_t lastModificationTimeCheck=0;
             if(::pread(cachefd,&lastModificationTimeCheck,sizeof(lastModificationTimeCheck),1*sizeof(uint64_t))!=sizeof(lastModificationTimeCheck))
@@ -561,7 +599,7 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
             if(lastModificationTimeCheck>(currentTime-Cache::timeToCache(http_code)))
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 if(readCache!=nullptr)
                 {
@@ -572,6 +610,14 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                 readCache->set_access_time(currentTime);
                 startRead();
                 return;
+            }
+            else
+            {
+                #ifdef DEBUGFILEOPEN
+                std::cerr << "Client::loadUrl(), readCache close: " << cachefd << ", " << __FILE__ << ":" << __LINE__ << std::endl;
+                #endif
+                //without the next line descriptor lost, generate: errno 24 (Too many open files)
+                ::close(cachefd);
             }
             if(Cache::hostsubfolder)
                 ::mkdir(("cache/"+folder).c_str(),S_IRWXU);
@@ -594,7 +640,7 @@ bool Client::canAddToPos(const int &i, const int &size, int &pos)
     if((pos+i)>size)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
         return false;
@@ -608,7 +654,7 @@ bool Client::read8Bits(uint8_t &var, const char * const data, const int &size, i
     if((pos+(int)sizeof(var))>size)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
         return false;
@@ -623,7 +669,7 @@ bool Client::read16Bits(uint16_t &var, const char * const data, const int &size,
     if((pos+(int)sizeof(var))>size)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
         return false;
@@ -640,7 +686,7 @@ bool Client::read24Bits(uint32_t &var, const char * const data, const int &size,
     if((pos+(int)sizeof(var)-1)>size)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
         return false;
@@ -655,7 +701,7 @@ bool Client::read24Bits(uint32_t &var, const char * const data, const int &size,
 void Client::dnsError()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     status=Status_Idle;
     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nDns Error";
@@ -666,7 +712,7 @@ void Client::dnsError()
 void Client::dnsWrong()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     status=Status_Idle;
     char text[]="Status: 403 Forbidden\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nThis site DNS (AAAA entry) is not into Confiared IPv6 range";
@@ -690,7 +736,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         std::cerr << "Internal error, try connect on ::" << std::endl;
         abort();
     }
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     status=Status_WaitTheContent;
     partial=false;
@@ -729,9 +775,19 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
     if(Http::pathToHttp.find(path)!=Http::pathToHttp.cend())
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
-        Http *http=Http::pathToHttp.at(path);
+        if(http!=nullptr)
+        {
+            if(!http->removeClient(this))
+            {
+                #ifdef DEBUGFASTCGI
+                std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+                #endif
+            }
+            http=nullptr;
+        }
+        http=Http::pathToHttp.at(path);
         http->addClient(this);//into this call, start open cache and stream if partial have started
     }
     else
@@ -744,7 +800,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         url+=host;
         url+=uri;
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         //try open cache
         //std::cerr << "open((path).c_str() " << path << std::endl;
@@ -753,7 +809,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         if(cachefd==-1)
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             if(errno!=2)//if not file not found
                 std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
@@ -763,14 +819,15 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             if(https)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 Https *https=new Https(0, //0 if no old cache file found
                                       path);
+                http=https;
                 if(https->tryConnect(sIPv6,host,uri))
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     Https::pathToHttps[path]=https;
                     https->addClient(this);//into this call, start open cache and stream if partial have started
@@ -778,7 +835,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                 else
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     status=Status_Idle;
                     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nSocket Error (1)";
@@ -789,14 +846,24 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             else
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
-                Http *http=new Http(0, //0 if no old cache file found
+                if(http!=nullptr)
+                {
+                    if(!http->removeClient(this))
+                    {
+                        #ifdef DEBUGFASTCGI
+                        std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+                        #endif
+                    }
+                    http=nullptr;
+                }
+                http=new Http(0, //0 if no old cache file found
                                       path);
                 if(http->tryConnect(sIPv6,host,uri))
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     Http::pathToHttp[path]=http;
                     http->addClient(this);//into this call, start open cache and stream if partial have started
@@ -804,7 +871,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                 else
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     status=Status_Idle;
                     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nSocket Error (1)";
@@ -816,7 +883,10 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         else
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
+            #endif
+            #ifdef DEBUGFILEOPEN
+            std::cerr << "Client::dnsRight() open: " << path << ", fd: " << cachefd << std::endl;
             #endif
             uint64_t lastModificationTimeCheck=0;
             if(::pread(cachefd,&lastModificationTimeCheck,sizeof(lastModificationTimeCheck),1*sizeof(uint64_t))!=sizeof(lastModificationTimeCheck))
@@ -829,7 +899,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             if(lastModificationTimeCheck>(currentTime-Cache::timeToCache(http_code)))
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 if(readCache!=nullptr)
                 {
@@ -862,20 +932,21 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                 }
             }
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
 
             if(https)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
                 Https *https=new Https(cachefd, //0 if no old cache file found
                                       path);
+                http=https;
                 if(https->tryConnect(sIPv6,host,uri,etag))
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     Https::pathToHttps[path]=https;
                     https->addClient(this);//into this call, start open cache and stream if partial have started
@@ -883,7 +954,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                 else
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     status=Status_Idle;
                     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nSocket Error (2)";
@@ -894,14 +965,24 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             else
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                 #endif
-                Http *http=new Http(cachefd, //0 if no old cache file found
+                if(http!=nullptr)
+                {
+                    if(!http->removeClient(this))
+                    {
+                        #ifdef DEBUGFASTCGI
+                        std::cerr << this << " not into client list of " << http << __FILE__ << ":" << __LINE__ << std::endl;
+                        #endif
+                    }
+                    http=nullptr;
+                }
+                http=new Http(cachefd, //0 if no old cache file found
                                       path);
                 if(http->tryConnect(sIPv6,host,uri,etag))
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     Http::pathToHttp[path]=http;
                     http->addClient(this);//into this call, start open cache and stream if partial have started
@@ -909,7 +990,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                 else
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     status=Status_Idle;
                     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nSocket Error (2)";
@@ -924,7 +1005,7 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
 void Client::startRead()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(!readCache->seekToContentPos())
     {
@@ -942,7 +1023,7 @@ void Client::startRead()
 void Client::startRead(const std::string &path, const bool &partial)
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     this->partial=partial;
     int cachefd = open(path.c_str(), O_RDWR | O_NOCTTY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -955,11 +1036,17 @@ void Client::startRead(const std::string &path, const bool &partial)
         writeEnd();
         return;
     }
+    else
+    {
+        #ifdef DEBUGFILEOPEN
+        std::cerr << "Client::startRead() open: " << path << ", fd: " << cachefd << std::endl;
+        #endif
+    }
     const off_t &s=lseek(cachefd,1*sizeof(uint64_t),SEEK_SET);
     if(s!=-1)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         const uint64_t &currentTime=time(NULL);
         if(readCache!=nullptr)
@@ -977,7 +1064,7 @@ void Client::startRead(const std::string &path, const bool &partial)
 void Client::tryResumeReadAfterEndOfFile()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(partialEndOfFileTrigged)
         continueRead();
@@ -986,14 +1073,14 @@ void Client::tryResumeReadAfterEndOfFile()
 void Client::continueRead()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(readCache==nullptr)
         return;
     if(!dataToWrite.empty())
         return;
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     char buffer[65536-1000];
     do {
@@ -1021,7 +1108,7 @@ void Client::continueRead()
 void Client::cacheError()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     status=Status_Idle;
     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nCache file error";
@@ -1032,7 +1119,7 @@ void Client::cacheError()
 void Client::readyToWrite()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(!dataToWrite.empty())
     {
@@ -1040,7 +1127,7 @@ void Client::readyToWrite()
         if(errno!=0 && errno!=EAGAIN)
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             disconnect();
             return;
@@ -1054,9 +1141,20 @@ void Client::readyToWrite()
         if(endTriggered==true)
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
             endTriggered=false;
+
+            #ifdef DEBUGFILEOPEN
+            std::cerr << "Client::~Client(), readCache close: " << readCache << std::endl;
+            #endif
+            if(readCache!=nullptr)
+            {
+                readCache->close();
+                delete readCache;
+                readCache=nullptr;
+            }
+
             disconnect();
         }
 
@@ -1097,6 +1195,8 @@ void Client::write(const char * const data,const int &size)
 {
     if(fd==-1)
         return;
+    if(data==nullptr)
+        return;
     if(!dataToWrite.empty())
     {
         dataToWrite+=std::string(data,size);
@@ -1125,7 +1225,7 @@ void Client::write(const char * const data,const int &size)
     else if(errno!=0 && errno!=EAGAIN)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         if(errno!=32)//if not BROKEN PIPE
             std::cerr << fd << ") error to write: " << errno << std::endl;
@@ -1140,7 +1240,7 @@ void Client::write(const char * const data,const int &size)
     else
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
         return;
@@ -1150,7 +1250,7 @@ void Client::write(const char * const data,const int &size)
 void Client::httpError(const std::string &errorString)
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     const std::string &fullContent=
             "Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nError: "+
@@ -1162,7 +1262,7 @@ void Client::httpError(const std::string &errorString)
 void Client::writeEnd()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
     #endif
     if(!outputWrited)
         return;
@@ -1185,10 +1285,16 @@ void Client::writeEnd()
 
     if(!dataToWrite.empty())
     {
-       dataToWrite+=std::string(header,sizeof(header));
-       endTriggered=true;
-       return;
+        dataToWrite+=std::string(header,sizeof(header));
+        endTriggered=true;
+        #ifdef DEBUGFILEOPEN
+        std::cerr << "Client::writeEnd() pre, readCache close: " << readCache << std::endl;
+        #endif
+        return;
     }
+    #ifdef DEBUGFILEOPEN
+    std::cerr << "Client::writeEnd() post, readCache close: " << readCache << std::endl;
+    #endif
     if(readCache!=nullptr)
     {
         readCache->close();
@@ -1202,7 +1308,7 @@ void Client::writeEnd()
     if(dataToWrite.empty())
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         disconnect();
     }
