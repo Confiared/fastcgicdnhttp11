@@ -20,6 +20,8 @@ struct __attribute__ ((__packed__)) dns_query {
 };
 
 Dns *Dns::dns=nullptr;
+const unsigned char Dns::include[]={0x28,0x03,0x19,0x20};
+const unsigned char Dns::exclude[]={0x28,0x03,0x19,0x20,0x00,0x00,0x00,0x00,0xb4,0xb2,0x5f,0x61,0xd3,0x7f};
 
 Dns::Dns()
 {
@@ -324,8 +326,7 @@ void Dns::parseEvent(const epoll_event &event)
                                         return;
 
                                     //TODO saveToCache();
-                                    unsigned char check[]={0x28,0x03,0x19,0x20};
-                                    if(memcmp(buffer+pos,check,sizeof(check))!=0)
+                                    if(memcmp(buffer+pos,Dns::include,sizeof(Dns::include))!=0 || memcmp(buffer+pos,Dns::exclude,sizeof(Dns::exclude))==0)
                                     {
                                         if(!clientsFlushed)
                                         {

@@ -40,6 +40,7 @@ SOURCES += main.cpp \
     Dns.cpp \
     Timer.cpp \
     Cache.cpp \
+    Timer/CheckTimeout.cpp \
     Timer/DNSCache.cpp \
     Timer/DNSQuery.cpp
 
@@ -55,5 +56,6 @@ HEADERS += \
     Dns.hpp \
     Timer.hpp \
     Cache.hpp \
+    Timer/CheckTimeout.hpp \
     Timer/DNSCache.hpp \
     Timer/DNSQuery.hpp

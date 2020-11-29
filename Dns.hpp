@@ -29,6 +29,8 @@ public:
     void cleanCache();
     void checkQueries();
     static Dns *dns;
+    static const unsigned char include[];
+    static const unsigned char exclude[];
 private:
     enum StatusEntry : uint8_t
     {

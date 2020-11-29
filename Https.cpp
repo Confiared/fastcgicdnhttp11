@@ -12,13 +12,23 @@ bool Https::tryConnectInternal(const sockaddr_in6 &s)
 {
     bool connectInternal=false;
     backend=Backend::tryConnectHttps(s,this,connectInternal);
+    if(backend==nullptr)
+        std::cerr << this << ": unable to get bakcend for " << getUrl() << std::endl;
     #ifdef DEBUGFASTCGI
     std::cerr << this << ": http->backend=" << backend << std::endl;
     #endif
-    return connectInternal;
+    return connectInternal && backend!=nullptr;
 }
 
 std::unordered_map<std::string,Http *> &Https::pendingList()
 {
     return pathToHttps;
+}
+
+std::string Https::getUrl()
+{
+    if(host.empty() && uri.empty())
+        return "no url";
+    else
+        return "https://"+host+uri;
 }

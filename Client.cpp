@@ -267,6 +267,17 @@ void Client::readyToRead()
 
                 switch(varSize)
                 {
+                    //anti loop protection:
+                    case 8:
+                    if(memcmp(buff+pos,"EPNOERFT",8)==0 && valSize==8)
+                        if(memcmp(buff+pos+varSize,"ysff43Uy",5)==0)
+                        {
+                            char text[]="X-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nAnti loop protection";
+                            writeOutput(text,sizeof(text)-1);
+                            writeEnd();
+                            return;
+                        }
+                    break;
                     case 9:
                     if(memcmp(buff+pos,"HTTP_HOST",9)==0)
                         host=std::string(buff+pos+varSize,valSize);
@@ -274,6 +285,12 @@ void Client::readyToRead()
                     case 11:
                     if(memcmp(buff+pos,"REQUEST_URI",11)==0)
                         uri=std::string(buff+pos+varSize,valSize);
+                    else if(memcmp(buff+pos,"REMOTE_ADDR",11)==0)
+                    {
+                    /* black list: self ip, block ip continuously downloading same thing
+                        ifNoneMatch=std::string(buff+pos+varSize,8);
+                        */
+                    }
                     /*else if(memcmp(buff+pos,"SERVER_PORT",11)==0 && valSize==3)
                         if(memcmp(buff+pos+varSize,"443",3)==0)
                             https=true;*/
@@ -506,6 +523,16 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         path+=urifolder;
     }
 
+    if(path=="cache/A66F8D1178084ED8" || path=="cache/A66F8D1178084ED8.tmp")
+    {
+        char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nBlacklisted file";
+        #ifdef DEBUGFASTCGI
+        std::cerr << this << " blacklisted file " << http << __FILE__ << ":" << __LINE__ << ": " << hostwithprotocol << uri << std::endl;
+        #endif
+        writeOutput(text,sizeof(text)-1);
+        writeEnd();
+        return;
+    }
     if(Http::pathToHttp.find(path)!=Http::pathToHttp.cend())
     {
         #ifdef DEBUGFASTCGI

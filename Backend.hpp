@@ -11,7 +11,7 @@
 
 class Http;
 
-#define MAXBACKEND 3
+#define MAXBACKEND 10
 
 class Backend : public EpollObject
 {
@@ -25,10 +25,12 @@ public:
     };
     enum NonHttpError : uint8_t
     {
-        NonHttpError_AlreadySend
+        NonHttpError_AlreadySend,
+        NonHttpError_Timeout
     };
 public:
     Backend(BackendList * backendList);
+    void close();
     virtual ~Backend();
     void remoteSocketClosed();
     static Backend * tryConnectInternalList(const sockaddr_in6 &s, Http *http, std::unordered_map<std::string, BackendList *> &addressToList, bool &connectInternal);
@@ -40,6 +42,8 @@ public:
     bool tryConnectInternal(const sockaddr_in6 &s);
     static std::unordered_map<std::string,BackendList *> addressToHttp;
     static std::unordered_map<std::string,BackendList *> addressToHttps;
+    static uint64_t currentTime();//ms from 1970
+    bool detectTimeout();
 
     void readyToWrite();
     ssize_t socketRead(void *buffer, size_t size);
@@ -53,6 +57,7 @@ public:
     bool https;
     bool wasTCPConnected;
 private:
+    uint64_t lastReceivedBytesTimestamps;
     std::string bufferSocket;
     BackendList * backendList;
 

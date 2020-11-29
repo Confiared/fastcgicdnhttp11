@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include <fcntl.h>
+#include <chrono>
 
 //ETag -> If-None-Match
 const char rChar[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
@@ -27,6 +28,7 @@ Http::Http(const int &cachefd, //0 if no old cache file found
     tempCache(nullptr),
     finalCache(nullptr),
     parsedHeader(false),
+    lastReceivedBytesTimestamps(0),
     contentsize(-1),
     contentwritten(0),
     http_code(0),
@@ -36,6 +38,7 @@ Http::Http(const int &cachefd, //0 if no old cache file found
     contentLengthPos(-1),
     chunkLength(-1)
 {
+    lastReceivedBytesTimestamps=Backend::currentTime();
     #ifdef DEBUGFASTCGI
     std::cerr << "contructor " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
     if(cachePath.empty())
@@ -97,10 +100,12 @@ bool Http::tryConnectInternal(const sockaddr_in6 &s)
 {
     bool connectInternal=false;
     backend=Backend::tryConnectHttp(s,this,connectInternal);
+    if(backend==nullptr)
+        std::cerr << this << ": unable to get bakcend for " << host << uri << std::endl;
     #ifdef DEBUGFASTCGI
     std::cerr << this << ": http->backend=" << backend << std::endl;
     #endif
-    return connectInternal;
+    return connectInternal && backend!=nullptr;
 }
 
 const std::string &Http::getCachePath() const
@@ -136,7 +141,7 @@ void Http::sendRequest()
     requestSended=true;
     if(etagBackend.empty())
     {
-        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\n"
+        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\nEPNOERFT: ysff43Uy\n"
               #ifdef HTTPGZIP
               "Accept-Encoding: gzip\n"+
               #endif
@@ -150,7 +155,7 @@ void Http::sendRequest()
     }
     else
     {
-        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\nIf-None-Match: "+etagBackend+"\n"
+        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\nEPNOERFT: ysff43Uy\nIf-None-Match: "+etagBackend+"\n"
               #ifdef HTTPGZIP
               "Accept-Encoding: gzip\n"+
               #endif
@@ -205,6 +210,7 @@ void Http::readyToRead()
         #endif
         if(size>0)
         {
+            lastReceivedBytesTimestamps=Backend::currentTime();
             //std::cout << std::string(buffer,size) << std::endl;
             if(parsing==Parsing_Content)
             {
@@ -672,7 +678,11 @@ void Http::readyToRead()
             }*/
         }
         else
-            std::cout << "socketRead(), errno " << errno << std::endl;
+        {
+            const auto p1 = std::chrono::system_clock::now();
+            std::cout << std::chrono::duration_cast<std::chrono::seconds>(
+                             p1.time_since_epoch()).count() << " socketRead(), errno " << errno << " for " << getUrl() << std::endl;
+        }
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
@@ -799,6 +809,14 @@ bool Http::backendError(const std::string &errorString)
     //disconnectSocket();
 }
 
+std::string Http::getUrl()
+{
+    if(host.empty() && uri.empty())
+        return "no url";
+    else
+        return "http://"+host+uri;
+}
+
 void Http::flushRead()
 {
     disconnectBackend();
@@ -814,6 +832,13 @@ void Http::parseNonHttpError(const Backend::NonHttpError &error)
         case Backend::NonHttpError_AlreadySend:
         {
             const std::string &errorString("Tcp request already send (internal error)");
+            for(Client * client : clientsList)
+                client->httpError(errorString);
+        }
+        break;
+        case Backend::NonHttpError_Timeout:
+        {
+            const std::string &errorString("Http timeout, too many time without data (internal error)");
             for(Client * client : clientsList)
                 client->httpError(errorString);
         }
@@ -1161,4 +1186,28 @@ std::string Http::timestampsToHttpDate(const int64_t &time)
     struct tm *my_tm = gmtime(&time);
     strftime(buffer, sizeof(buffer), "%a, %d %b %Y %H:%M:%S GMT", my_tm);
     return buffer;
+}
+
+//return true if timeout
+bool Http::detectTimeout()
+{
+    const uint64_t msFrom1970=Backend::currentTime();
+    if(lastReceivedBytesTimestamps>msFrom1970-600000)
+    {
+        //prevent time drift
+        if(lastReceivedBytesTimestamps>msFrom1970)
+            lastReceivedBytesTimestamps=msFrom1970;
+        return false;
+    }
+    //if no byte received into 600s (10m)
+    parseNonHttpError(Backend::NonHttpError_Timeout);
+    for(Client * client : clientsList)
+        client->writeEnd();
+    clientsList.clear();
+    if(backend!=nullptr)
+    {
+        disconnectBackend();
+        //backend->close();//keep the backend running, another protection fix this
+    }
+    return true;
 }

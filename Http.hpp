@@ -39,7 +39,9 @@ public:
     bool haveUrlAndFrontendConnected();
     bool HttpReturnCode(const int &errorCode);
     bool backendError(const std::string &errorString);
+    virtual std::string getUrl();
     void parseNonHttpError(const Backend::NonHttpError &error);
+    bool detectTimeout();
 
     ssize_t socketRead(void *buffer, size_t size);
     bool socketWrite(const void *buffer, size_t size);
@@ -54,6 +56,7 @@ private:
     Cache *tempCache;
     Cache *finalCache;
     bool parsedHeader;
+    uint64_t lastReceivedBytesTimestamps;
 
     std::string contenttype;
     std::string url;
@@ -66,6 +69,8 @@ private:
         Parsing_None,
         Parsing_HeaderVar,
         Parsing_HeaderVal,
+        Parsing_RemoteAddr,
+        Parsing_ServerAddr,
         Parsing_ContentLength,
         Parsing_ContentType,
         #ifdef HTTPGZIP
@@ -76,9 +81,11 @@ private:
     };
     Parsing parsing;
 
+    std::string etagBackend;
+    std::string remoteAddr;
+protected:
     std::string host;
     std::string uri;
-    std::string etagBackend;
 public:
     bool requestSended;
     Backend *backend;

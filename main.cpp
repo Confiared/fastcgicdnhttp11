@@ -12,6 +12,7 @@
 #include "Timer.hpp"
 #include "Timer/DNSCache.hpp"
 #include "Timer/DNSQuery.hpp"
+#include "Timer/CheckTimeout.hpp"
 #include <vector>
 #include <cstring>
 #include <cstdio>
@@ -94,6 +95,8 @@ int main(int argc, char *argv[])
     dnsCache.start(3600*1000);
     DNSQuery dnsQuery;
     dnsQuery.start(10);
+    CheckTimeout checkTimeout;
+    checkTimeout.start(1000);
 
     /* cachePath (content header, 64Bits aligned):
      * 64Bits: access time

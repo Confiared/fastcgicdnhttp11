@@ -8,6 +8,7 @@
 #include <sys/types.h>          /* See NOTES */
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#include <sys/time.h>
 
 //curl -v -H "Accept-Encoding: gzip" -o style.css.gz 'http://cdn.bolivia-online.com/ultracopier-static.first-world.info/css/style.css'
 
@@ -20,11 +21,13 @@ Backend::Backend(BackendList * backendList) :
     http(nullptr),
     https(false),
     wasTCPConnected(false),
+    lastReceivedBytesTimestamps(0),
     backendList(backendList),
     meth(nullptr),
     ctx(nullptr),
     ssl(nullptr)
 {
+    lastReceivedBytesTimestamps=Backend::currentTime();
     this->kind=EpollObject::Kind::Kind_Backend;
 }
 
@@ -70,6 +73,15 @@ Backend::~Backend()
             index++;
         }
     }
+}
+
+void Backend::close()
+{
+    #ifdef DEBUGFASTCGI
+    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif
+    if(fd!=-1)
+        ::close(fd);
 }
 
 void Backend::remoteSocketClosed()
@@ -343,6 +355,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
 {
     connectInternal=true;
     std::string addr((char *)&s.sin6_addr,16);
+    //if have already connected backend on this ip
     if(addressToList.find(addr)!=addressToList.cend())
     {
         BackendList *list=addressToList[addr];
@@ -382,6 +395,18 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
             else
             {
                 list->pending.push_back(http);
+                //list busy
+                std::cerr << "backend busy on: ";
+                for(const Backend *b : list->busy)
+                {
+                    if(b==nullptr)
+                        std::cerr << "no backend";
+                    else if(b->http==nullptr)
+                        std::cerr << "no http";
+                    else
+                        b->http->getUrl();
+                }
+                std::cerr << std::endl;
                 return nullptr;
             }
         }
@@ -512,7 +537,7 @@ void Backend::startHttps()
                 #ifdef DEBUGFILEOPEN
                 std::cerr << "Backend::startHttps(), fd: " << fd << std::endl;
                 #endif
-                close(fd);
+                ::close(fd);
                 return;
             }
         }
@@ -762,7 +787,10 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
             return -1;
         }
         else
+        {
+            lastReceivedBytesTimestamps=Backend::currentTime();
             return readen;
+        }
     }
     else
     {
@@ -770,6 +798,8 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
         #ifdef DEBUGFASTCGI
         std::cout << "Socket byte read: " << s << std::endl;
         #endif
+        if(s>0)
+            lastReceivedBytesTimestamps=Backend::currentTime();
         return s;
     }
 }
@@ -801,7 +831,7 @@ bool Backend::socketWrite(const void *buffer, size_t size)
         if (writenSize==-1)
         {
             std::cerr << "SSL_write(ssl, buffer,size); return -1" << std::endl;
-            abort();
+            return false;
         }
 
         if (writenSize <= 0) {
@@ -845,4 +875,29 @@ bool Backend::socketWrite(const void *buffer, size_t size)
             std::cerr << "Http socket errno:" << errno << std::endl;
         return false;
     }
+}
+
+uint64_t Backend::currentTime() //ms from 1970
+{
+    struct timeval te;
+    gettimeofday(&te, NULL);
+    return te.tv_sec*1000LL + te.tv_usec/1000;
+}
+
+bool Backend::detectTimeout()
+{
+    //if no http then idle, no data, skip detect timeout
+    if(http==nullptr)
+        return false;
+    const uint64_t msFrom1970=Backend::currentTime();
+    if(lastReceivedBytesTimestamps>msFrom1970-5000)
+    {
+        //prevent time drift
+        if(lastReceivedBytesTimestamps>msFrom1970)
+            lastReceivedBytesTimestamps=msFrom1970;
+        return false;
+    }
+    //if no byte received into 5s
+    close();
+    return true;
 }
