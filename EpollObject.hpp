@@ -7,9 +7,6 @@
 class EpollObject
 {
 public:
-    EpollObject();
-    virtual ~EpollObject();
-    bool isValid() const;
     enum Kind : uint8_t
     {
         Kind_Server,
@@ -20,8 +17,14 @@ public:
         Kind_Cache,
         Kind_ServerTCP,
     };
+    EpollObject();
+    EpollObject(const int fd,const Kind kind);
+    virtual ~EpollObject();
+    bool isValid() const;
     virtual void parseEvent(const epoll_event &event) = 0;
     const Kind &getKind() const;
+    void workAroundBug();
+    int getFD();
 protected:
     int fd;
     Kind kind;

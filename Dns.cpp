@@ -602,7 +602,12 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
     std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
     if(clientInProgress>1000)
+    {
+        #ifdef DEBUGFASTCGI
+        std::cerr << "overloaded, clientInProgress " << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
         return false;
+    }
     clientInProgress++;
     /* TODO if(isInCache())
     {load from cache}*/

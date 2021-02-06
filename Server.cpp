@@ -54,7 +54,7 @@ Server::Server(const char *const path)
 
     epoll_event event;
     event.data.ptr = this;
-    event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    event.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
     //std::cerr << "EPOLL_CTL_ADD: " << fd << std::endl;
     if(epoll_ctl(epollfd,EPOLL_CTL_ADD, fd, &event) == -1)
     {
@@ -172,7 +172,7 @@ bool Server::tryListenInternal(const char* const ip,const char* const port)
 
             epoll_event event;
             event.data.ptr = this;
-            event.events = EPOLLIN | EPOLLOUT | EPOLLET;
+            event.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
             s = epoll_ctl(epollfd,EPOLL_CTL_ADD, fd, &event);
             if(s == -1)
             {
@@ -231,7 +231,7 @@ void Server::parseEvent(const epoll_event &)
         //setup unix socket non blocking and listen
         epoll_event event;
         event.data.ptr = client;
-        event.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLHUP;
+        event.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
         //std::cerr << "EPOLL_CTL_ADD: " << infd << std::endl;
         if(epoll_ctl(epollfd,EPOLL_CTL_ADD, infd, &event) == -1)
         {

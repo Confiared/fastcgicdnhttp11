@@ -13,9 +13,9 @@ bool Https::tryConnectInternal(const sockaddr_in6 &s)
     bool connectInternal=false;
     backend=Backend::tryConnectHttps(s,this,connectInternal);
     if(backend==nullptr)
-        std::cerr << this << ": unable to get bakcend for " << getUrl() << std::endl;
+        std::cerr << this << ": unable to get backend for " << getUrl() << std::endl;
     #ifdef DEBUGFASTCGI
-    std::cerr << this << ": http->backend=" << backend << std::endl;
+    std::cerr << this << ": http->backend=" << backend << " && connectInternal=" << connectInternal << std::endl;
     #endif
     return connectInternal && backend!=nullptr;
 }

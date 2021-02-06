@@ -5,6 +5,9 @@
 #include <vector>
 #include <netinet/in.h>
 #include <unordered_map>
+#ifdef MAXFILESIZE
+#include <unordered_set>
+#endif
 
 #include "EpollObject.hpp"
 #include "Backend.hpp"
@@ -30,13 +33,14 @@ public:
     virtual std::unordered_map<std::string,Http *> &pendingList();
     void disconnectBackend();
     const int &getAction() const;
-    int write(const char * const data, const size_t &size, bool &endDetected);
+    int write(const char * const data, const size_t &size);
     static std::string timestampsToHttpDate(const int64_t &time);
     void addClient(Client * client);
     bool removeClient(Client * client);
     const std::string &getCachePath() const;
     void resetRequestSended();
     bool haveUrlAndFrontendConnected();
+    bool isAlive();
     bool HttpReturnCode(const int &errorCode);
     bool backendError(const std::string &errorString);
     virtual std::string getUrl();
@@ -48,11 +52,17 @@ public:
 public:
     static std::unordered_map<std::string,Http *> pathToHttp;
     static int fdRandom;
+    #ifdef MAXFILESIZE
+    static std::unordered_map<std::string,Http *> duplicateOpen;
+    std::string cachePath;
+    #endif
 private:
-    static char buffer[4096];
+    static char buffer[1024*1024];
 private:
     std::vector<Client *> clientsList;
+    #ifndef MAXFILESIZE
     std::string cachePath;
+    #endif
     Cache *tempCache;
     Cache *finalCache;
     bool parsedHeader;
@@ -88,6 +98,8 @@ protected:
     std::string uri;
 public:
     bool requestSended;
+    bool headerWriten;
+    bool endDetected;
     Backend *backend;
     int64_t contentLengthPos;
     int64_t chunkLength;

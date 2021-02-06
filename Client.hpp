@@ -15,6 +15,7 @@ public:
     ~Client();
     void parseEvent(const epoll_event &event) override;
     void disconnect();
+    void disconnectFromHttp();
 
     void dnsRight(const sockaddr_in6 &sIPv6);
     void dnsError();
@@ -34,8 +35,8 @@ public:
     void writeEnd();
     void httpError(const std::string &errorString);
 
-    void startRead();
-    void startRead(const std::string &path, const bool &partial);
+    bool startRead();
+    bool startRead(const std::string &path, const bool &partial);
     void continueRead();
     void tryResumeReadAfterEndOfFile();
 
@@ -59,6 +60,9 @@ private:
     bool outputWrited;
     std::string uri;
     std::string host;
+    #ifdef MAXFILESIZE
+    size_t readSizeFromCache;
+    #endif
 };
 
 #endif // Client_H

@@ -11,11 +11,10 @@
 
 class Http;
 
-#define MAXBACKEND 10
-
 class Backend : public EpollObject
 {
 public:
+    static uint32_t maxBackend;
     struct BackendList
     {
         std::vector<Backend *> busy;
@@ -64,6 +63,11 @@ private:
     const SSL_METHOD *meth;
     SSL_CTX* ctx;
     SSL* ssl;
+
+    #ifdef MAXFILESIZE
+    int fileGetCount;
+    int byteReceived;
+    #endif
 };
 
 #endif // BACKEND_H

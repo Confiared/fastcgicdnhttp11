@@ -4,6 +4,7 @@
 #include "EpollObject.hpp"
 
 #include <string>
+#include <unordered_map>
 
 class Cache;
 
@@ -18,17 +19,26 @@ public:
     uint16_t http_code() const;
     std::string ETagFrontend() const;//string of 6 char
     std::string ETagBackend() const;
-    void set_access_time(const uint64_t &time);
-    void set_last_modification_time_check(const uint64_t &time);
-    void set_http_code(const uint16_t &http_code);
-    void set_ETagFrontend(const std::string &etag);//string of 6 char
-    void set_ETagBackend(const std::string &etag);//at end seek to content pos
+    bool set_access_time(const uint64_t &time);
+    bool set_last_modification_time_check(const uint64_t &time);
+    bool set_http_code(const uint16_t &http_code);
+    bool set_ETagFrontend(const std::string &etag);//string of 6 char
+    bool set_ETagBackend(const std::string &etag);//at end seek to content pos
     void close();
     void setAsync();
     bool seekToContentPos();
     ssize_t write(const char * const data,const size_t &size);
     ssize_t read(char * data,const size_t &size);
     static uint32_t timeToCache(uint16_t http_code);
+    ssize_t size() const;
+
+    static void newFD(const int &fd, void *pointer, const EpollObject::Kind &kind);
+    static void closeFD(const int &fd);
+    struct FDSave {
+        void * pointer;
+        EpollObject::Kind kind;
+    };
+
 public://configured by argument, see main.cpp
     /*
      * better performance in flat directory cache, but most FS have problem for more than 30k file on unique folder
@@ -36,6 +46,14 @@ public://configured by argument, see main.cpp
      * Also, the way directories are stored on ext* filesystems is essentially as one big list. On the more modern filesystems (Reiser, XFS, JFS) they are stored as B-trees, which are much more efficient for large sets.
     */
     static bool hostsubfolder;
+    static bool enable;
+    static uint32_t http200Time;
+
+    #ifdef MAXFILESIZE
+    size_t readSizeFromCache;
+    #endif
+private:
+    static std::unordered_map<int,FDSave> FDList;
 };
 
 #endif // Cache_H

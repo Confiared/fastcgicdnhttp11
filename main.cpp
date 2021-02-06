@@ -43,33 +43,48 @@ int main(int argc, char *argv[])
     mkdir("cache", S_IRWXU);
     Backend::https_portBE=be16toh(443);
 
-    std::vector <std::string> sources;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--flatcache") {
+        std::string argvcpp(argv[i]);
+        if (argvcpp == "--flatcache") {
+            #ifdef DEBUGFASTCGI
+            std::cout << "Now cache is flat" << std::endl;
+            #endif
             Cache::hostsubfolder=false;
-        }/* else if (std::string(argv[i]) == "--maxiumSizeToBeSmallFile") {
-            if (i + 1 < argc) { // Make sure we aren't at the end of argv!
-                std::string maxiumSizeToBeSmallFile = argv[i++]; // Increment 'i' so we don't get the argument as the next argv[i].
-
-            } else { // Uh-oh, there was no argument to the destination option.
-                std::cerr << "--maxiumSizeToBeSmallFile option requires one argument." << std::endl;
-                return 1;
+        }
+        else if (argvcpp == "--nocache") {
+            #ifdef DEBUGFASTCGI
+            std::cout << "Now cache is deleted when finish" << std::endl;
+            #endif
+            Cache::enable=false;
+        }
+        else if (std::string(argv[i]) == "--help") {
+                    std::cerr << "--flatcache: use flat cache, the host cache folder is not created" << std::endl;
+                    std::cerr << "--nocache: to file on disk is only used to have temp file, removed at end of downloading" << std::endl;
+                    std::cerr << "--http200Time=999: for http 200, time in seconds without recheck" << std::endl;
+                    std::cerr << "--maxBackend=999: maximum backend to a single IP (connexion limit)" << std::endl;
+                    //std::cerr << "--maxiumSizeToBeSmallFile: (TODO) if smaller than this size, save into memory" << std::endl;
+                    //std::cerr << "--maxiumSmallFileCacheSize: (TODO) The maximum content stored in memory, this cache prevent syscall and disk seek" << std::endl;
+                    return 1;
+        }
+        else
+        {
+            std::string::size_type n=argvcpp.find("=");
+            if (n != std::string::npos) {
+                std::string var=argvcpp.substr(0,n);
+                std::string val=argvcpp.substr(n+1);
+                if (var=="--http200Time") {
+                    Cache::http200Time=std::stoi(val);
+                    #ifdef DEBUGFASTCGI
+                    std::cout << "Now Cache::http200Time is " << Cache::http200Time << "s" << std::endl;
+                    #endif
+                }
+                else if (var=="--maxBackend") {
+                    Backend::maxBackend=std::stoi(val);
+                    #ifdef DEBUGFASTCGI
+                    std::cout << "Now Backend::maxBackend is " << Backend::maxBackend << std::endl;
+                    #endif
+                }
             }
-        } else if (std::string(argv[i]) == "--maxiumSmallFileCacheSize") {
-            if (i + 1 < argc) { // Make sure we aren't at the end of argv!
-                std::string maxiumSmallFileCacheSize = argv[i++]; // Increment 'i' so we don't get the argument as the next argv[i].
-
-            } else { // Uh-oh, there was no argument to the destination option.
-                std::cerr << "--memorycachemap option requires one argument." << std::endl;
-                return 1;
-            }
-        }*/ else if (std::string(argv[i]) == "--help") {
-            std::cerr << "--flatcache: use flat cache, the host cache folder is not created" << std::endl;
-            //std::cerr << "--maxiumSizeToBeSmallFile: (TODO) if smaller than this size, save into memory" << std::endl;
-            //std::cerr << "--maxiumSmallFileCacheSize: (TODO) The maximum content stored in memory, this cache prevent syscall and disk seek" << std::endl;
-            return 1;
-        } else {
-            sources.push_back(argv[i]);
         }
     }
 

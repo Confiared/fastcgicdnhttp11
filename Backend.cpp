@@ -1,5 +1,6 @@
 #include "Backend.hpp"
 #include "Http.hpp"
+#include "Cache.hpp"
 #include <iostream>
 #include <fcntl.h>
 #include <arpa/inet.h>
@@ -9,11 +10,17 @@
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+
+#ifdef DEBUGFASTCGI
+#include <sys/time.h>
+#endif
 
 //curl -v -H "Accept-Encoding: gzip" -o style.css.gz 'http://cdn.bolivia-online.com/ultracopier-static.first-world.info/css/style.css'
 
 std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttp;
 std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttps;
+uint32_t Backend::maxBackend=64;
 
 uint16_t Backend::https_portBE=0;
 
@@ -29,16 +36,22 @@ Backend::Backend(BackendList * backendList) :
 {
     lastReceivedBytesTimestamps=Backend::currentTime();
     this->kind=EpollObject::Kind::Kind_Backend;
+
+    #ifdef MAXFILESIZE
+    fileGetCount=0;
+    byteReceived=0;
+    #endif
 }
 
 Backend::~Backend()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
     if(fd!=-1)
     {
         std::cerr << "EPOLL_CTL_DEL Http: " << fd << std::endl;
+        Cache::closeFD(fd);
         if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL)==-1)
             std::cerr << "EPOLL_CTL_DEL Http: " << fd << ", errno: " << errno << std::endl;
     }
@@ -78,16 +91,22 @@ Backend::~Backend()
 void Backend::close()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << "Backend::close() " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
     if(fd!=-1)
+    {
+        Cache::closeFD(fd);
+        epoll_ctl(epollfd,EPOLL_CTL_DEL, fd, NULL);
         ::close(fd);
+        //prevent multiple loop call
+        fd=-1;
+    }
 }
 
 void Backend::remoteSocketClosed()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << "Backend::remoteSocketClosed() " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
     #ifdef DEBUGFILEOPEN
     std::cerr << "Backend::remoteSocketClosed(), fd: " << fd << std::endl;
@@ -97,6 +116,7 @@ void Backend::remoteSocketClosed()
         #ifdef DEBUGFASTCGI
         std::cerr << "EPOLL_CTL_DEL remoteSocketClosed Http: " << fd << std::endl;
         #endif
+        Cache::closeFD(fd);
         if(epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL)==-1)
             std::cerr << "EPOLL_CTL_DEL remoteSocketClosed Http: " << fd << ", errno: " << errno << std::endl;
         ::close(fd);
@@ -129,20 +149,22 @@ void Backend::remoteSocketClosed()
                 {
                     Http *http=backendList->pending.at(index);
                     http->backendError(error);
+                    http->disconnectFrontend();
+                    http->disconnectBackend();
                     index++;
                 }
             }
             if(http!=nullptr)
                 http->backend=nullptr;
             #ifdef DEBUGFASTCGI
-            std::cerr << "remoteSocketClosed " << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << "remoteSocketClosed and was NOT TCP connected " << __FILE__ << ":" << __LINE__ << std::endl;
             #endif
             return;
         }
         else
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " was TCP connected" << std::endl;
             #endif
             size_t index=0;
             while(index<backendList->busy.size())
@@ -150,17 +172,24 @@ void Backend::remoteSocketClosed()
                 if(backendList->busy.at(index)==this)
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " located into busy to destroy" << std::endl;
                     #endif
                     backendList->busy.erase(backendList->busy.cbegin()+index);
                     if(http!=nullptr)
                     {
+                        #ifdef DEBUGFASTCGI
+                        std::cerr << __FILE__ << ":" << __LINE__ << " backend destroy but had http client connected, try reasign" << std::endl;
+                        #endif
                         /*if(http->requestSended)
                         {
                             std::cerr << "reassign but request already send" << std::endl;
                             http->parseNonHttpError(Backend::NonHttpError_AlreadySend);
                             return;
                         }*/
+                        #ifdef DEBUGFASTCGI
+                        if(http->requestSended)
+                            std::cerr << "reassign but request already send" << std::endl;
+                        #endif
                         http->requestSended=false;
                         //reassign to idle backend
                         if(!backendList->idle.empty())
@@ -171,7 +200,7 @@ void Backend::remoteSocketClosed()
                             backendList->busy.push_back(backend);
                             backend->http=http;
                             #ifdef DEBUGFASTCGI
-                            std::cerr << http << ": http->backend=" << backend << std::endl;
+                            std::cerr << http << ": http->backend=" << backend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << backend->isValid() << std::endl;
                             #endif
                             http->backend=backend;
                             http->readyToWrite();
@@ -185,7 +214,7 @@ void Backend::remoteSocketClosed()
                                 return;
                             newBackend->http=http;
                             #ifdef DEBUGFASTCGI
-                            std::cerr << http << ": http->backend=" << newBackend << std::endl;
+                            std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::endl;
                             #endif
                             http->backend=newBackend;
 
@@ -228,12 +257,18 @@ void Backend::remoteSocketClosed()
 void Backend::downloadFinished()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " http " << http << " is finished, will be destruct" << std::endl;
     if(http==nullptr)
         std::cerr << __FILE__ << ":" << __LINE__ << "Backend::downloadFinished() http==nullptr bug suspected" << std::endl;
     #endif
     if(backendList==nullptr)
+    {
+        #ifdef DEBUGFASTCGI
+        std::cerr << __FILE__ << ":" << __LINE__ << " http " << http << " backendList==nullptr return" << std::endl;
+        #endif
+        http=nullptr;
         return;
+    }
     if(!wasTCPConnected)
     {
         size_t index=0;
@@ -254,6 +289,8 @@ void Backend::downloadFinished()
             {
                 Http *http=backendList->pending.at(index);
                 http->backendError(error);
+                http->disconnectFrontend();
+                //http->disconnectBackend();-> no backend because pending
                 index++;
             }
         }
@@ -264,6 +301,7 @@ void Backend::downloadFinished()
         std::cerr << "Backend::downloadFinished() NOT TRY AGAIN" << std::endl;
         #endif
         http->backend=nullptr;
+        http=nullptr;
         return;
     }
     if(backendList->pending.empty())
@@ -281,9 +319,10 @@ void Backend::downloadFinished()
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
-        backendList->idle.push_back(this);
+        if(this->isValid())
+            backendList->idle.push_back(this);
         #ifdef DEBUGFASTCGI
-        std::cerr << this << " backend, " << http << ": http->backend=null + http=nullptr" << std::endl;
+        std::cerr << this << " backend, " << http << ": http->backend=null + http=nullptr" << " " << __FILE__ << ":" << __LINE__ << " isValid: " << this->isValid() << std::endl;
         #endif
         http->backend=nullptr;
         http=nullptr;
@@ -316,6 +355,8 @@ void Backend::downloadFinished()
             else
             {
                 httpToGet->backendError("Internal error, !haveUrlAndFrontendConnected");
+                httpToGet->disconnectFrontend();
+                httpToGet->disconnectBackend();
                 #ifdef DEBUGFASTCGI
                 std::cerr << __FILE__ << ":" << __LINE__ << ", http buggy, skipped: " << httpToGet << std::endl;
                 #endif
@@ -334,9 +375,10 @@ void Backend::downloadFinished()
                 index++;
             }
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+            std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " " << " isValid: " << this->isValid() << std::endl;
             #endif
-            backendList->idle.push_back(this);
+            if(this->isValid())
+                backendList->idle.push_back(this);
         }
         #ifdef DEBUGFASTCGI
         if(haveFound)
@@ -367,7 +409,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
             list->busy.push_back(backend);
             backend->http=http;
             #ifdef DEBUGFASTCGI
-            std::cerr << http << ": http->backend=" << backend << std::endl;
+            std::cerr << http << ": http->backend=" << backend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << backend->isValid() << std::endl;
             #endif
             http->backend=backend;
             http->readyToWrite();
@@ -375,7 +417,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
         }
         else
         {
-            if(list->busy.size()<MAXBACKEND)
+            if(list->busy.size()<Backend::maxBackend)
             {
                 Backend *newBackend=new Backend(list);
                 if(!newBackend->tryConnectInternal(s))
@@ -385,7 +427,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
                 }
                 newBackend->http=http;
                 #ifdef DEBUGFASTCGI
-                std::cerr << http << ": http->backend=" << newBackend << std::endl;
+                std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::endl;
                 #endif
                 http->backend=newBackend;
 
@@ -397,14 +439,18 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
                 list->pending.push_back(http);
                 //list busy
                 std::cerr << "backend busy on: ";
+                int index=0;
                 for(const Backend *b : list->busy)
                 {
+                    if(index>0)
+                        std::cerr << ", ";
                     if(b==nullptr)
                         std::cerr << "no backend";
                     else if(b->http==nullptr)
                         std::cerr << "no http";
                     else
-                        b->http->getUrl();
+                        std::cerr << "url: " << b->http->getUrl();
+                    index++;
                 }
                 std::cerr << std::endl;
                 return nullptr;
@@ -424,7 +470,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
         }
         newBackend->http=http;
         #ifdef DEBUGFASTCGI
-        std::cerr << http << ": http->backend=" << newBackend << std::endl;
+        std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::endl;
         #endif
         http->backend=newBackend;
 
@@ -432,6 +478,9 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
         addressToList[addr]=list;
         return newBackend;
     }
+    #ifdef DEBUGFASTCGI
+    std::cerr << http << ": http->backend out of condition" << std::endl;
+    #endif
     return nullptr;
 }
 
@@ -445,7 +494,7 @@ void Backend::startHttps()
     if(ssl!=nullptr)
     {
         std::cerr << "Backend::startHttps(): ssl!=nullptr at start" << std::endl;
-        abort();
+        return;
     }
     #ifdef DEBUGFASTCGI
     std::cerr << "Backend::startHttps(): " << this << std::endl;
@@ -461,39 +510,39 @@ void Backend::startHttps()
     if (ctx==NULL)
     {
         std::cerr << "ctx = SSL_CTX_new(meth); return NULL" << std::endl;
-        abort();
+        return;
     }
 
     /* ---------------------------------------------------------------- */
     /* Cipher AES128-GCM-SHA256 and AES256-GCM-SHA384 - good performance with AES-NI support. */
     if (!SSL_CTX_set_cipher_list(ctx, "AES128-GCM-SHA256")) {
         printf("Could not set cipher list");
-        abort();
+        return;
     }
     /* ------------------------------- */
     /* Configure certificates and keys */
     if (!SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION)) {
         printf("Could not disable compression");
-        abort();
+        return;
     }
 /*    if (SSL_CTX_load_verify_locations(ctx, CERTF, 0) <= 0) {
         ERR_print_errors_fp(stderr);
-        abort();
+        return;
     }
     if (SSL_CTX_use_certificate_file(ctx, CERTF, SSL_FILETYPE_PEM) <= 0) {
         printf("Could not load cert file: ");
         ERR_print_errors_fp(stderr);
-        abort();
+        return;
     }
     if (SSL_CTX_use_PrivateKey_file(ctx, KEYF, SSL_FILETYPE_PEM) <= 0) {
         printf("Could not load key file");
         ERR_print_errors_fp(stderr);
-        abort();
+        return;
     }
     if (!SSL_CTX_check_private_key(ctx)) {
         fprintf(stderr,
                 "Private key does not match public key in certificate.\n");
-        abort();
+        return;
     }*/
     /* Enable client certificate verification. Enable before accepting connections. */
     /*SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT |
@@ -505,7 +554,7 @@ void Backend::startHttps()
     if (ssl==NULL)
     {
         std::cerr << "SSL_new(ctx); return NULL" << std::endl;
-        abort();
+        return;
     }
 
     SSL_set_fd(ssl, fd);
@@ -525,7 +574,17 @@ void Backend::startHttps()
             }
             else if(err == SSL_ERROR_ZERO_RETURN) {
                 printf("SSL_connect: close notify received from peer");
-                abort();
+                SSL_free(ssl);
+                meth=nullptr;
+                ctx=nullptr;
+                ssl=nullptr;
+                #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
+                std::cerr << "Backend::startHttps(), fd: " << fd << ", err == SSL_ERROR_ZERO_RETURN" << std::endl;
+                #endif
+                Cache::closeFD(fd);
+                ::close(fd);
+                fd=-1;
+                return;
             }
             else {
                 printf("Error SSL_connect: %d", err);
@@ -534,10 +593,12 @@ void Backend::startHttps()
                 meth=nullptr;
                 ctx=nullptr;
                 ssl=nullptr;
-                #ifdef DEBUGFILEOPEN
+                #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
                 std::cerr << "Backend::startHttps(), fd: " << fd << std::endl;
                 #endif
+                Cache::closeFD(fd);
                 ::close(fd);
+                fd=-1;
                 return;
             }
         }
@@ -614,6 +675,7 @@ bool Backend::tryConnectInternal(const sockaddr_in6 &s)
         std::cerr << "Unable to create socket" << std::endl;
         return false;
     }
+    Cache::newFD(fd,this,EpollObject::Kind::Kind_Backend);
 
     char astring[INET6_ADDRSTRLEN];
     inet_ntop(AF_INET6, &(s.sin6_addr), astring, INET6_ADDRSTRLEN);
@@ -621,7 +683,7 @@ bool Backend::tryConnectInternal(const sockaddr_in6 &s)
     if(std::string(astring)=="::")
     {
         std::cerr << "Internal error, try connect on ::" << std::endl;
-        abort();
+        return false;
     }
     printf("Try connect on %s %i\n", astring, be16toh(s.sin6_port));
     std::cerr << std::endl;
@@ -634,7 +696,7 @@ bool Backend::tryConnectInternal(const sockaddr_in6 &s)
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags < 0) {
             std::cerr << "fcntl(fd, F_GETFL, 0); return < 0" << std::endl;
-            abort();
+            //return false;
         }
         fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
@@ -659,7 +721,10 @@ bool Backend::tryConnectInternal(const sockaddr_in6 &s)
     int t = epoll_ctl(EpollObject::epollfd, EPOLL_CTL_ADD, fd, &event);
     if (t == -1) {
         std::cerr << "epoll_ctl(EpollObject::epollfd, EPOLL_CTL_ADD, fd, &event); return -1" << std::endl;
-        abort();
+        Cache::closeFD(fd);
+        ::close(fd);
+        fd=-1;
+        return false;
     }
 
     /*sockaddr_in6 targetDnsIPv6;
@@ -677,19 +742,30 @@ bool Backend::tryConnectInternal(const sockaddr_in6 &s)
 
 void Backend::parseEvent(const epoll_event &event)
 {
+    #ifdef DEBUGFASTCGI
+    if(event.events & ~EPOLLOUT & ~EPOLLIN)
+        std::cout << this << " Backend::parseEvent event.events: " << event.events << std::endl;
+    #endif
     if(event.events & EPOLLIN)
     {
         #ifdef DEBUGFASTCGI
-        std::cout << "EPOLLIN" << std::endl;
+        //std::cout << "EPOLLIN" << std::endl;
         #endif
         if(http!=nullptr)
             http->readyToRead();
+        else
+        {
+            std::cerr << "Received data while not connected to http" << std::endl;
+            char buffer[1024*1024];
+            while(Backend::socketRead(buffer,sizeof(buffer))>0)
+            {}
+        }
     }
     if(event.events & EPOLLOUT)
     {
-        #ifdef DEBUGFASTCGI
+        /*#ifdef DEBUGFASTCGI
         std::cout << "EPOLLOUT" << std::endl;
-        #endif
+        #endif*/
         if(ssl==nullptr && https)
             startHttps();
         if(http!=nullptr)
@@ -744,11 +820,12 @@ void Backend::readyToWrite()
 ssize_t Backend::socketRead(void *buffer, size_t size)
 {
     #ifdef DEBUGFASTCGI
-    std::cout << "Socket try read" << std::endl;
+    //std::cout << "Socket try read" << std::endl;
     if(http==nullptr)
     {
-        std::cerr << "socketRead() when no http set" << std::endl;
-        abort();
+        std::cerr << this << " " << "socketRead() when no http set" << std::endl;
+        errno=0;
+        return -1;
     }
     #endif
     if(fd<0)
@@ -759,31 +836,41 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
     if(ssl!=nullptr)
     {
         int readen = SSL_read(ssl, buffer, size);
-        if (readen==-1)
+        if (readen<0)
         {
-            std::cerr << "SSL_read return -1" << std::endl;
+            if(errno!=11)
+                std::cerr << this << " " << "SSL_read return -1 with errno " << errno << std::endl;
             return -1;
         }
-        #ifdef DEBUGFASTCGI
+        #ifdef MAXFILESIZE
+        byteReceived+=readen;
+        if(byteReceived>100000000)
+        {
+            std::cerr << this << " " << "Byte received from SSL is > 100MB (abort)" << std::endl;
+            abort();
+        }
+        #endif
+        /*#ifdef DEBUGFASTCGI
         std::cout << "Socket byte read: " << readen << std::endl;
         std::cerr << "Client Received " << readen << " chars - '" << std::string((char *)buffer,readen) << "'" << std::endl;
-        #endif
+        #endif*/
 
         if (readen <= 0) {
             if(readen == SSL_ERROR_WANT_READ ||
                 readen == SSL_ERROR_WANT_WRITE ||
                 readen == SSL_ERROR_WANT_X509_LOOKUP) {
-                printf("Read could not complete. Will be invoked later.");
+                std::cerr << this << " " << "Read could not complete. Will be invoked later." << std::endl;
                 return -1;
             }
             else if(readen == SSL_ERROR_ZERO_RETURN) {
-                printf("SSL_read: close notify received from peer");
+                std::cerr << this << " " << "SSL_read: close notify received from peer" << std::endl;
                 return -1;
             }
             else {
-                printf("Error during SSL_read");
+                std::cerr << this << " " << "Error during SSL_read" << std::endl;
                 return -1;
             }
+            std::cerr << this << " " << "Error during SSL_read bis" << std::endl;
             return -1;
         }
         else
@@ -795,9 +882,17 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
     else
     {
         const ssize_t &s=::read(fd,buffer,size);
-        #ifdef DEBUGFASTCGI
-        std::cout << "Socket byte read: " << s << std::endl;
+        #ifdef MAXFILESIZE
+        byteReceived+=s;
+        if(byteReceived>100000000)
+        {
+            std::cerr << "Byte received from SSL is > 100MB (abort)" << std::endl;
+            abort();
+        }
         #endif
+        /*#ifdef DEBUGFASTCGI
+        std::cout << "Socket byte read: " << s << std::endl;
+        #endif*/
         if(s>0)
             lastReceivedBytesTimestamps=Backend::currentTime();
         return s;
@@ -806,47 +901,74 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
 
 bool Backend::socketWrite(const void *buffer, size_t size)
 {
+    #ifdef MAXFILESIZE
+    fileGetCount++;
+    if(fileGetCount>500)
+    {
+        std::cerr << this << " " << "socketRead() fileGetCount>500" << std::endl;
+        close();
+        errno=0;
+        return false;
+    }
+    #endif
     #ifdef DEBUGFASTCGI
-    std::cout << "Try socket write: " << size << std::endl;
+    std::cout << this << " " << "Try socket write: " << size << std::endl;
     if(http==nullptr)
     {
-        std::cerr << "socketRead() when no http set" << std::endl;
-        abort();
+        std::cerr << this << " " << "socketRead() when no http set" << std::endl;
+        errno=0;
+        return false;
     }
     #endif
     if(fd<0)
+    {
+        #ifdef DEBUGFASTCGI
+        std::cerr << this << " " << "Backend::socketWrite() fd<0" << std::endl;
+        #endif
         return false;
+    }
     if(!this->bufferSocket.empty())
     {
+        #ifdef DEBUGFASTCGI
+        std::cerr << this << " " << "Backend::socketWrite() !this->bufferSocket.empty()" << std::endl;
+        #endif
         this->bufferSocket+=std::string((char *)buffer,size);
         return true;
     }
+    #ifdef MAXFILESIZE
+    {
+        struct stat sb;
+        int rstat=fstat(fd,&sb);
+        if(rstat==0 && sb.st_size>100000000)
+        {
+            std::cerr << this << " " << "too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << std::endl;
+            abort();
+        }
+    }
+    #endif
     ssize_t sizeW=-1;
     if(ssl!=nullptr)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << "Client Send " << size << " chars - '" << std::string((char *)buffer,size) << "'" << std::endl;
+        std::cout << this << " " << "Try SSL socket write: " << size << std::endl;
+        #endif
+        #ifdef DEBUGFASTCGI
+        //std::cerr << "Client Send " << size << " chars - '" << std::string((char *)buffer,size) << "'" << std::endl;
         #endif
         int writenSize = SSL_write(ssl, buffer,size);
-        if (writenSize==-1)
-        {
-            std::cerr << "SSL_write(ssl, buffer,size); return -1" << std::endl;
-            return false;
-        }
-
         if (writenSize <= 0) {
             if(writenSize == SSL_ERROR_WANT_READ ||
                 writenSize == SSL_ERROR_WANT_WRITE ||
                 writenSize == SSL_ERROR_WANT_X509_LOOKUP) {
-                printf("Write could not complete. Will be invoked later.");
+                std::cerr << this << " SSL_write(ssl, buffer,size); return -1 Write could not complete. Will be invoked later., errno " << errno << " fd: " << getFD() << std::endl;
                 return false;
             }
             else if(writenSize == SSL_ERROR_ZERO_RETURN) {
-                printf("SSL_write: close notify received from peer");
+                std::cerr << this << " SSL_write(ssl, buffer,size); return -1 close notify received from peer, errno " << errno << " fd: " << getFD() << std::endl;
                 return false;
             }
             else {
-                printf("Error during SSL_write");
+                std::cerr << this << " SSL_write(ssl, buffer,size); return -1, errno " << errno << " fd: " << getFD() << std::endl;
                 return false;
             }
         }
@@ -854,7 +976,23 @@ bool Backend::socketWrite(const void *buffer, size_t size)
             sizeW=writenSize;
     }
     else
+    {
+        #ifdef DEBUGFASTCGI
+        std::cout << this << " " << "Try socket write: " << size << std::endl;
+        #endif
         sizeW=::write(fd,buffer,size);
+    }
+    #ifdef MAXFILESIZE
+    {
+        struct stat sb;
+        int rstat=fstat(fd,&sb);
+        if(rstat==0 && sb.st_size>100000000)
+        {
+            std::cerr << this << " " << "too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << std::endl;
+            abort();
+        }
+    }
+    #endif
     #ifdef DEBUGFASTCGI
     std::cout << "Socket Writed bytes: " << size << std::endl;
     #endif
@@ -863,7 +1001,7 @@ bool Backend::socketWrite(const void *buffer, size_t size)
         if((size_t)sizeW<size)
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << "sizeW only: " << sizeW << std::endl;
+            std::cerr << this << " " << "sizeW only: " << sizeW << std::endl;
             #endif
             this->bufferSocket+=std::string((char *)buffer+sizeW,size-sizeW);
         }
@@ -872,7 +1010,7 @@ bool Backend::socketWrite(const void *buffer, size_t size)
     else
     {
         if(errno!=32)//if not broken pipe
-            std::cerr << "Http socket errno:" << errno << std::endl;
+            std::cerr << this << " " << "Http socket errno:" << errno << std::endl;
         return false;
     }
 }
@@ -898,6 +1036,19 @@ bool Backend::detectTimeout()
         return false;
     }
     //if no byte received into 5s
+    #ifdef DEBUGFASTCGI
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    std::cerr << "[" << tv.tv_sec << "] ";
+    #endif
+    std::cerr << "Backend::detectTimeout() timeout while downloading " << http->getUrl() << " from " << http << " (backend " << this << ")" << std::endl;
+    if(http!=nullptr)
+        http->backendError("Timeout");
+    if(http!=nullptr)
+        http->disconnectFrontend();
+    if(http!=nullptr)
+        http->disconnectBackend();
     close();
+    //abort();
     return true;
 }
