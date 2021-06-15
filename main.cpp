@@ -34,12 +34,18 @@ void signal_callback_handler(int signum) {
 
 int main(int argc, char *argv[])
 {
+    /* ------------ */
+    /* Init openssl */
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+
     /* Catch Signal Handler SIGPIPE */
     if(signal(SIGPIPE, signal_callback_handler)==SIG_ERR)
     {
         std::cerr << "signal(SIGPIPE, signal_callback_handler)==SIG_ERR, errno: " << std::to_string(errno) << std::endl;
         abort();
     }
+    memset(Http::buffer,0,sizeof(Http::buffer));
     mkdir("cache", S_IRWXU);
     Backend::https_portBE=be16toh(443);
 

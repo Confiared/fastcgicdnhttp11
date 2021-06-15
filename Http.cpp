@@ -2055,12 +2055,12 @@ void Http::disconnectFrontend()
     #endif
 }
 
-bool Http::haveUrlAndFrontendConnected()
+bool Http::haveUrlAndFrontendConnected() const
 {
     return !host.empty() && !uri.empty() && !clientsList.empty();
 }
 
-bool Http::isAlive()
+bool Http::isAlive() const
 {
     return !host.empty() && !uri.empty();
 }
@@ -2105,7 +2105,7 @@ bool Http::HttpReturnCode(const int &errorCode)
             return false;
         }
     }
-    const std::string &errorString("Http "+std::to_string(errorCode));
+    const std::string errorString("Http "+std::to_string(errorCode));
     for(Client * client : clientsList)
         client->httpError(errorString);
     clientsList.clear();
@@ -2153,7 +2153,7 @@ bool Http::backendError(const std::string &errorString)
     //disconnectSocket();
 }
 
-std::string Http::getUrl()
+std::string Http::getUrl() const
 {
     if(host.empty() && uri.empty())
         return "no url";
@@ -2755,11 +2755,14 @@ std::string Http::timestampsToHttpDate(const int64_t &time)
 bool Http::detectTimeout()
 {
     const uint64_t msFrom1970=Backend::currentTime();
-    if(lastReceivedBytesTimestamps>msFrom1970-600000)
+    if(lastReceivedBytesTimestamps>(msFrom1970-10*1000))
     {
         //prevent time drift
         if(lastReceivedBytesTimestamps>msFrom1970)
+        {
+            std::cerr << "Http::detectTimeout(), time drift" << std::endl;
             lastReceivedBytesTimestamps=msFrom1970;
+        }
         return false;
     }
     //if no byte received into 600s (10m)
@@ -2776,4 +2779,25 @@ bool Http::detectTimeout()
         //backend->close();//keep the backend running, another protection fix this
     }
     return true;
+}
+
+std::string Http::getQuery() const
+{
+    std::string ret;
+    if(!isAlive())
+        ret+="not alive";
+    else
+        ret+="alive on "+getUrl();
+    if(!clientsList.empty())
+        ret+=" with "+std::to_string(clientsList.size())+" client(s)";
+    ret+=" last byte "+std::to_string(lastReceivedBytesTimestamps)+", etagBackend: "+etagBackend;
+    if(requestSended)
+        ret+=", requestSended";
+    else
+        ret+=", !requestSended";
+    if(endDetected)
+        ret+=", endDetected";
+    else
+        ret+=", !endDetected";
+    return ret;
 }

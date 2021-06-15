@@ -29,6 +29,7 @@ public:
     void cleanCache();
     void checkQueries();
     static Dns *dns;
+    std::string getQueryList() const;
     static const unsigned char include[];
     static const unsigned char exclude[];
 private:

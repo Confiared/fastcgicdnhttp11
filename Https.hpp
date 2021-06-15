@@ -15,7 +15,7 @@ public:
     static void dump_cert_info(SSL *ssl, bool server);
     #endif
     void init_ssl_opts(SSL_CTX* ctx);
-    std::string getUrl();
+    std::string getUrl() const;
 public:
     static std::unordered_map<std::string,Http *> pathToHttps;
 };

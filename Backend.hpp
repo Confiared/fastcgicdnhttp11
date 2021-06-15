@@ -30,6 +30,7 @@ public:
 public:
     Backend(BackendList * backendList);
     void close();
+    void closeSSL();
     virtual ~Backend();
     void remoteSocketClosed();
     static Backend * tryConnectInternalList(const sockaddr_in6 &s, Http *http, std::unordered_map<std::string, BackendList *> &addressToList, bool &connectInternal);
@@ -43,6 +44,7 @@ public:
     static std::unordered_map<std::string,BackendList *> addressToHttps;
     static uint64_t currentTime();//ms from 1970
     bool detectTimeout();
+    std::string getQuery() const;
 
     void readyToWrite();
     ssize_t socketRead(void *buffer, size_t size);

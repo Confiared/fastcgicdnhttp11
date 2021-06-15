@@ -271,6 +271,9 @@ void Dns::parseEvent(const epoll_event &event)
                                 c->dnsError();
                             for(Client * const c : https)
                                 c->dnsError();
+                            #ifdef DEBUGFASTCGI
+                            std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to  wrong string to resolve, host is not dns valid: " << transactionId << std::endl;
+                            #endif
                             removeQuery(transactionId);
                         }
                     }
@@ -284,6 +287,9 @@ void Dns::parseEvent(const epoll_event &event)
                                 c->dnsError();
                             for(Client * const c : https)
                                 c->dnsError();
+                            #ifdef DEBUGFASTCGI
+                            std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to (flags & 0xFA0F)!=0x8000: " << transactionId << std::endl;
+                            #endif
                             removeQuery(transactionId);
                         }
                     }
@@ -293,7 +299,12 @@ void Dns::parseEvent(const epoll_event &event)
                         {
                             uint16_t AName=0;
                             if(!read16Bits(AName,buffer,size,pos))
+                            {
+                                #ifdef DEBUGFASTCGI
+                                std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read AName: " << transactionId << std::endl;
+                                #endif
                                 return;
+                            }
                             uint16_t type=0;
                             if(!read16Bits(type,buffer,size,pos))
                                 if(!clientsFlushed)
@@ -304,6 +315,9 @@ void Dns::parseEvent(const epoll_event &event)
                                         c->dnsError();
                                     for(Client * const c : https)
                                         c->dnsError();
+                                    #ifdef DEBUGFASTCGI
+                                    std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read type: " << transactionId << std::endl;
+                                    #endif
                                     removeQuery(transactionId);
                                 }
                             switch(type)
@@ -313,17 +327,42 @@ void Dns::parseEvent(const epoll_event &event)
                                 {
                                     uint16_t classIn=0;
                                     if(!read16Bits(classIn,buffer,size,pos))
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read classIn: " << transactionId << std::endl;
+                                        #endif
                                         return;
+                                    }
                                     if(classIn!=0x0001)
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to classIn!=0x0001: " << transactionId << std::endl;
+                                        #endif
                                         break;
+                                    }
                                     uint32_t ttl=0;
                                     if(!read32Bits(ttl,buffer,size,pos))
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read ttl: " << transactionId << std::endl;
+                                        #endif
                                         return;
+                                    }
                                     uint16_t datasize=0;
                                     if(!read16Bits(datasize,buffer,size,pos))
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read datasize: " << transactionId << std::endl;
+                                        #endif
                                         return;
+                                    }
                                     if(datasize!=16)
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to failed read datasize!=16: " << transactionId << std::endl;
+                                        #endif
                                         return;
+                                    }
 
                                     //TODO saveToCache();
                                     if(memcmp(buffer+pos,Dns::include,sizeof(Dns::include))!=0 || memcmp(buffer+pos,Dns::exclude,sizeof(Dns::exclude))==0)
@@ -336,6 +375,9 @@ void Dns::parseEvent(const epoll_event &event)
                                                 c->dnsWrong();
                                             for(Client * const c : https)
                                                 c->dnsWrong();
+                                            #ifdef DEBUGFASTCGI
+                                            std::cerr << __FILE__ << ":" << __LINE__ << " wrong ip, dns done: " << transactionId << std::endl;
+                                            #endif
                                             removeQuery(transactionId);
                                         }
                                     }
@@ -358,7 +400,9 @@ void Dns::parseEvent(const epoll_event &event)
                                                 for(Client * const c : https)
                                                     c->dnsRight(targetHttps);
                                             }
-
+                                            #ifdef DEBUGFASTCGI
+                                            std::cerr << __FILE__ << ":" << __LINE__ << " right ip, dns done: " << transactionId << std::endl;
+                                            #endif
                                             removeQuery(transactionId);
                                         }
                                     }
@@ -366,10 +410,18 @@ void Dns::parseEvent(const epoll_event &event)
                                 break;
                                 default:
                                 {
+                                    #ifdef DEBUGFASTCGI
+                                    std::cerr << __FILE__ << ":" << __LINE__ << " skip query: " << transactionId << " type " << type << std::endl;
+                                    #endif
                                     canAddToPos(2+4,size,pos);
                                     uint16_t datasize=0;
                                     if(!read16Bits(datasize,buffer,size,pos))
+                                    {
+                                        #ifdef DEBUGFASTCGI
+                                        std::cerr << __FILE__ << ":" << __LINE__ << " skip query, failed read datasize " << type << std::endl;
+                                        #endif
                                         return;
+                                    }
                                     canAddToPos(datasize,size,pos);
                                 }
                                 break;
@@ -384,6 +436,9 @@ void Dns::parseEvent(const epoll_event &event)
                                 c->dnsError();
                             for(Client * const c : https)
                                 c->dnsError();
+                            #ifdef DEBUGFASTCGI
+                            std::cerr << __FILE__ << ":" << __LINE__ << " if(!clientsFlushed): " << transactionId << std::endl;
+                            #endif
                             removeQuery(transactionId);
                         }
                     }
@@ -523,8 +578,13 @@ bool Dns::read32Bits(uint32_t &var, const char * const data, const int &size, in
 
 bool Dns::get(Client * client, const std::string &host, const bool &https)
 {
+    if(client==nullptr)
+    {
+        std::cerr << __FILE__ << ":" << __LINE__ << " Dns::get() client==nullptr" << std::endl;
+        abort();
+    }
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << std::endl;
     if(host=="www.bolivia-online.com" || host=="bolivia-online.com")
     {
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
@@ -661,9 +721,17 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
     pos+=1;
 
     if(mode==Mode_IPv6)
-        /*int result = */sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
+    {
+        const int result = sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
+        if(result!=sizeof(targetDnsIPv6))
+            std::cerr << "sendto Mode_IPv6" << std::endl;
+    }
     else //if(mode==Mode_IPv4)
-        /*int result = */sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
+    {
+        const int result = sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
+        if(result!=sizeof(targetDnsIPv4))
+            std::cerr << "sendto Mode_IPv4" << std::endl;
+    }
 
     Query queryToPush;
     queryToPush.host=host;
@@ -674,6 +742,9 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
         queryToPush.https.push_back(client);
     else
         queryToPush.http.push_back(client);
+    #ifdef DEBUGFASTCGI
+    std::cerr << __FILE__ << ":" << __LINE__ << " dns query send " << query->id << std::endl;
+    #endif
     addQuery(query->id,queryToPush);
     return true;
 }
@@ -741,6 +812,27 @@ int Dns::requestCountMerged()
     return queryListByHost.size();
 }
 
+std::string Dns::getQueryList() const
+{
+    std::string ret;
+    const std::map<uint64_t,std::vector<uint16_t>> queryByNextDueTime=this->queryByNextDueTime;
+    for (auto const &x : queryByNextDueTime)
+    {
+        if(!ret.empty())
+            ret+=",";
+        ret+=std::to_string(x.first)+" (";
+        std::string retT;
+        for (auto const &y : x.second)
+        {
+            if(!retT.empty())
+                retT+=",";
+            retT+=std::to_string(y);
+        }
+        ret+=retT+")";
+    }
+    return ret;
+}
+
 void Dns::checkQueries()
 {
     const std::map<uint64_t,std::vector<uint16_t>> queryByNextDueTime=this->queryByNextDueTime;
@@ -756,9 +848,17 @@ void Dns::checkQueries()
             if(query.retryTime<2)
             {
                 if(mode==Mode_IPv6)
-                    /*int result = */sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
+                {
+                    const int result = sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
+                    if(result!=sizeof(targetDnsIPv6))
+                        std::cerr << "sendto Mode_IPv6 reemit" << std::endl;
+                }
                 else //if(mode==Mode_IPv4)
-                    /*int result = */sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
+                {
+                    const int result = sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
+                    if(result!=sizeof(targetDnsIPv4))
+                        std::cerr << "sendto Mode_IPv4 reemit" << std::endl;
+                }
                 query.retryTime++;
                 query.nextRetry=time(NULL)+5;
                 this->queryByNextDueTime[query.nextRetry].push_back(id);
@@ -771,6 +871,9 @@ void Dns::checkQueries()
                 const std::vector<Client *> &https=query.https;
                 for(Client * const c : https)
                     c->dnsError();
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " remove query due to timeout: " << id << std::endl;
+                #endif
                 removeQuery(id);
             }
 

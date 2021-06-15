@@ -86,6 +86,7 @@ Backend::~Backend()
             index++;
         }
     }
+    closeSSL();
 }
 
 void Backend::close()
@@ -100,6 +101,27 @@ void Backend::close()
         ::close(fd);
         //prevent multiple loop call
         fd=-1;
+    }
+    closeSSL();
+}
+
+void Backend::closeSSL()
+{
+    if(ssl!=nullptr)
+    {
+        SSL_free(ssl);
+        ssl=nullptr;
+    }
+    meth = TLS_client_method();
+    if(meth!=nullptr)
+    {
+        delete meth;
+        meth=nullptr;
+    }
+    if(ctx!=NULL)
+    {
+        SSL_CTX_free(ctx);
+        ctx=nullptr;
     }
 }
 
@@ -122,6 +144,7 @@ void Backend::remoteSocketClosed()
         ::close(fd);
         fd=-1;
     }
+    closeSSL();
     if(http!=nullptr)
         http->resetRequestSended();
     #ifdef DEBUGFASTCGI
@@ -499,15 +522,11 @@ void Backend::startHttps()
     #ifdef DEBUGFASTCGI
     std::cerr << "Backend::startHttps(): " << this << std::endl;
     #endif
-    /* ------------ */
-    /* Init openssl */
-    SSL_load_error_strings();
-    OpenSSL_add_ssl_algorithms();
 
     /* ------------------------------------- */
     meth = TLS_client_method();
     ctx = SSL_CTX_new(meth);
-    if (ctx==NULL)
+    if (ctx==nullptr)
     {
         std::cerr << "ctx = SSL_CTX_new(meth); return NULL" << std::endl;
         return;
@@ -551,13 +570,24 @@ void Backend::startHttps()
 
     /* Start SSL negotiation, connection available. */
     ssl = SSL_new(ctx);
-    if (ssl==NULL)
+    if (ssl==nullptr)
     {
         std::cerr << "SSL_new(ctx); return NULL" << std::endl;
         return;
     }
 
-    SSL_set_fd(ssl, fd);
+    if(!SSL_set_fd(ssl, fd))
+    {
+        printf("SSL_set_fd failed");
+        closeSSL();
+        #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
+        std::cerr << "Backend::startHttps(), fd: " << fd << ", err == SSL_ERROR_ZERO_RETURN" << std::endl;
+        #endif
+        Cache::closeFD(fd);
+        ::close(fd);
+        fd=-1;
+        return;
+    }
     SSL_set_connect_state(ssl);
 
     for(;;) {
@@ -574,10 +604,7 @@ void Backend::startHttps()
             }
             else if(err == SSL_ERROR_ZERO_RETURN) {
                 printf("SSL_connect: close notify received from peer");
-                SSL_free(ssl);
-                meth=nullptr;
-                ctx=nullptr;
-                ssl=nullptr;
+                closeSSL();
                 #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
                 std::cerr << "Backend::startHttps(), fd: " << fd << ", err == SSL_ERROR_ZERO_RETURN" << std::endl;
                 #endif
@@ -589,10 +616,7 @@ void Backend::startHttps()
             else {
                 printf("Error SSL_connect: %d", err);
                 perror("perror: ");
-                SSL_free(ssl);
-                meth=nullptr;
-                ctx=nullptr;
-                ssl=nullptr;
+                closeSSL();
                 #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
                 std::cerr << "Backend::startHttps(), fd: " << fd << std::endl;
                 #endif
@@ -1028,7 +1052,7 @@ bool Backend::detectTimeout()
     if(http==nullptr)
         return false;
     const uint64_t msFrom1970=Backend::currentTime();
-    if(lastReceivedBytesTimestamps>msFrom1970-5000)
+    if(lastReceivedBytesTimestamps>(msFrom1970-5*1000))
     {
         //prevent time drift
         if(lastReceivedBytesTimestamps>msFrom1970)
@@ -1051,4 +1075,19 @@ bool Backend::detectTimeout()
     close();
     //abort();
     return true;
+}
+
+std::string Backend::getQuery() const
+{
+    std::string ret;
+    if(http==nullptr)
+        ret+="not alive";
+    else
+        ret+="alive on "+http->getUrl();
+    ret+=" last byte "+std::to_string(lastReceivedBytesTimestamps);
+    if(wasTCPConnected)
+        ret+=" wasTCPConnected";
+    else
+        ret+=" !wasTCPConnected";
+    return ret;
 }

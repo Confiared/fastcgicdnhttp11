@@ -4,6 +4,7 @@
 #include "EpollObject.hpp"
 #include <string>
 #include <netinet/in.h>
+#include <unordered_set>
 
 class Cache;
 class Http;
@@ -39,6 +40,7 @@ public:
     bool startRead(const std::string &path, const bool &partial);
     void continueRead();
     void tryResumeReadAfterEndOfFile();
+    bool detectTimeout();
 
     enum Status : uint8_t
     {
@@ -46,6 +48,8 @@ public:
         Status_WaitDns=0x01,
         Status_WaitTheContent=0x02,
     };
+
+    static std::unordered_set<Client *> clients;//for timeout
 private:
     int fastcgiid;
     Cache *readCache;
@@ -63,6 +67,7 @@ private:
     #ifdef MAXFILESIZE
     size_t readSizeFromCache;
     #endif
+    uint64_t creationTime;
 };
 
 #endif // Client_H

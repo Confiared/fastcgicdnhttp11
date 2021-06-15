@@ -25,7 +25,7 @@ std::unordered_map<std::string,Http *> &Https::pendingList()
     return pathToHttps;
 }
 
-std::string Https::getUrl()
+std::string Https::getUrl() const
 {
     if(host.empty() && uri.empty())
         return "no url";

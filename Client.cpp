@@ -19,6 +19,8 @@
 #include <arpa/inet.h>
 #endif
 
+std::unordered_set<Client *> Client::clients;
+
 Client::Client(int cfd) :
     EpollObject(cfd,EpollObject::Kind::Kind_Client),
     fastcgiid(-1),
@@ -30,7 +32,8 @@ Client::Client(int cfd) :
     https(false),
     partial(false),
     partialEndOfFileTrigged(false),
-    outputWrited(false)
+    outputWrited(false),
+    creationTime(0)
 {
     Cache::newFD(cfd,this,EpollObject::Kind::Kind_Client);
     this->kind=EpollObject::Kind::Kind_Client;
@@ -41,10 +44,13 @@ Client::Client(int cfd) :
     #ifdef MAXFILESIZE
     readSizeFromCache=0;
     #endif
+    clients.insert(this);
+    creationTime=Backend::currentTime();
 }
 
 Client::~Client()
 {
+    clients.erase(this);
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " destructor " << this << std::endl;
     #endif
@@ -95,6 +101,7 @@ void Client::disconnect()
     if(http!=nullptr)
     {
         struct stat sb;
+        sb.st_size=0;
         int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
         if(rstat==0 && sb.st_size>100000000)
         {
@@ -106,6 +113,7 @@ void Client::disconnect()
     #ifdef DEBUGFASTCGI
     {
         struct stat sb;
+        sb.st_size=0;
         if(fstat(fd,&sb)!=0)
             std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " size: " << sb.st_size << std::endl;
         else
@@ -592,6 +600,90 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         disconnect();
         return;
     }
+    else if(host=="debug.m3MM7UcOEr3qP3ZK") {
+        std::string reply("X-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\n");
+        reply+="Current time: ";
+        reply+=std::to_string(Backend::currentTime());
+        reply+="\r\n";
+        reply+="Dns: ";
+        reply+=Dns::dns->getQueryList();
+        reply+="\r\n";
+        reply+="Clients: ";
+        reply+=Client::clients.size();
+        reply+="\r\n";
+        reply+="Http: ";
+        {
+            std::string ret;
+            for( const auto &n : Http::pathToHttp )
+            {
+                const Http * const client=n.second;
+                if(client!=nullptr)
+                    ret+="http "+client->getQuery()+"\r\n";
+            }
+            for( const auto &n : Https::pathToHttps )
+            {
+                const Http * const client=n.second;
+                if(client!=nullptr)
+                    ret+="https "+client->getQuery()+"\r\n";
+            }
+            for( const auto &n : Backend::addressToHttp )
+            {
+                const std::string &host=n.first;
+                ret+="backend http "+host+"\r\n";
+                {
+                    const std::vector<Backend *> &backend=n.second->busy;
+                    for( const auto &m : backend )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+                ret+=";\r\n";
+                {
+                    const std::vector<Backend *> &backend=n.second->idle;
+                    for( const auto &m : backend )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+                ret+=";\r\n";
+                {
+                    const std::vector<Http *> &pending=n.second->pending;
+                    for( const auto &m : pending )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+            }
+            for( const auto &n : Backend::addressToHttps )
+            {
+                const std::string &host=n.first;
+                ret+="backend https "+host+"\r\n";
+                {
+                    const std::vector<Backend *> &backend=n.second->busy;
+                    for( const auto &m : backend )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+                ret+=";\r\n";
+                {
+                    const std::vector<Backend *> &backend=n.second->idle;
+                    for( const auto &m : backend )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+                ret+=";\r\n";
+                {
+                    const std::vector<Http *> &pending=n.second->pending;
+                    for( const auto &m : pending )
+                        if(m!=nullptr)
+                            ret+=m->getQuery()+"\r\n";
+                }
+            }
+            reply+=ret;
+        }
+        reply+="\r\n";
+        writeOutput(reply.data(),reply.size());
+        writeEnd();
+        disconnect();
+        return;
+    }
 
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
@@ -710,6 +802,7 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
     if(!httpBackendFound)
     {
         struct stat sb;
+        struct stat sb2;
         std::string url;
         if(https)
             url="https://";
@@ -718,16 +811,26 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         url+=host;
         url+=uri;
         //try open cache
-        const bool cacheWasExists=stat(path.c_str(),&sb)==0;
         #ifdef DEBUGFASTCGI
+        const bool cacheWasExists=stat(path.c_str(),&sb)==0;
         if(cacheWasExists)
         {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
         #endif
         //std::cerr << "open((path).c_str() " << path << std::endl;
         int cachefd = open(path.c_str(), O_RDWR | O_NOCTTY/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+        #ifdef DEBUGFASTCGI
+        const bool cacheWasExists3=stat(path.c_str(),&sb)==0;
+        if(cacheWasExists3)
+        {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
+        #endif
         //if failed open cache
         if(cachefd==-1)
         {
+            #ifdef DEBUGFASTCGI
+            const bool cacheWasExists4=stat(path.c_str(),&sb)==0;
+            if(cacheWasExists4)
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << " exists, should not, errno: " << errno << std::endl;}
+            #endif
             if(errno!=2)//if not file not found
                 std::cerr << "can't open cache file " << path << " for " << url << " due to errno: " << errno << std::endl;
             if(Cache::hostsubfolder)
@@ -748,8 +851,18 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         }
         else
         {
+            #ifdef DEBUGFASTCGI
+            const bool cacheWasExists2=stat(path.c_str(),&sb)==0;
+            fstat(cachefd,&sb2);
+            if(!cacheWasExists)
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way" << std::endl;}
+            if(!cacheWasExists && cacheWasExists2)
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way 2" << std::endl;}
+            #endif
             #ifdef DEBUGFILEOPEN
-            std::cerr << "Client::loadUrl() open: " << path << ", fd: " << cachefd << ", " << url << std::endl;
+            stat(path.c_str(),&sb);
+            fstat(cachefd,&sb2);
+            std::cerr << "Client::loadUrl() open: " << path << ", fd: " << cachefd << ", size real:" << sb.st_size << ", " << url << ", size open: " << sb2.st_size << std::endl;
             #endif
             #ifdef DEBUGFASTCGI
             std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
@@ -770,17 +883,14 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                         std::cerr << "Client::loadUrl(), readCache close: " << cachefd << std::endl;
                         #endif
                         ::close(cachefd);
-                        #ifdef DEBUGFASTCGI
-                        std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
-                        #endif
                         return;
                     }
                 }
             }
 
-            fstat(fd,&sb);
+            fstat(cachefd,&sb);
             #ifdef DEBUGFASTCGI
-            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache size: " << sb.st_size << std::endl;}
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
             #endif
             if(sb.st_size<25)
             {
@@ -1127,7 +1237,10 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         url+=host;
         url+=uri;
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
+        struct stat sb;
+        const bool cacheWasExists=stat(path.c_str(),&sb)==0;
+        if(cacheWasExists)
+        {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
         #endif
         #ifdef MAXFILESIZE
         {
@@ -1237,6 +1350,13 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         }
         else
         {
+            #ifdef DEBUGFASTCGI
+            const bool cacheWasExists2=stat(path.c_str(),&sb)==0;
+            if(!cacheWasExists)
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way" << std::endl;}
+            if(!cacheWasExists && cacheWasExists2)
+            {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way 2" << std::endl;}
+            #endif
             #ifdef DEBUGFASTCGI
             std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
             #endif
@@ -1507,6 +1627,12 @@ bool Client::startRead(const std::string &path, const bool &partial)
     #endif
     this->partial=partial;
     //O_WRONLY -> failed, need Read too call Cache::seekToContentPos(), read used to get pos
+    #ifdef DEBUGFASTCGI
+    struct stat sb;
+    const bool cacheWasExists=stat(path.c_str(),&sb)==0;
+    if(cacheWasExists)
+    {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
+    #endif
     int cachefd = open(path.c_str(), O_RDWR | O_NOCTTY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     #ifdef MAXFILESIZE
     if(http!=nullptr)
@@ -1568,6 +1694,13 @@ bool Client::startRead(const std::string &path, const bool &partial)
     }
     else
     {
+        #ifdef DEBUGFASTCGI
+        const bool cacheWasExists2=stat(path.c_str(),&sb)==0;
+        if(!cacheWasExists)
+        {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way" << std::endl;}
+        if(!cacheWasExists && cacheWasExists2)
+        {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way 2" << std::endl;}
+        #endif
         #ifdef MAXFILESIZE
         if(http!=nullptr)
         {
@@ -2502,4 +2635,23 @@ void Client::writeEnd()
     }
     else
         endTriggered=true;
+}
+
+bool Client::detectTimeout()
+{
+    if(fullyParsed)
+        return false;
+    const uint64_t msFrom1970=Backend::currentTime();
+    if(creationTime>(msFrom1970-5000))
+    {
+        //prevent time drift
+        if(creationTime>msFrom1970)
+        {
+            std::cerr << "Http::detectTimeout(), time drift" << std::endl;
+            creationTime=msFrom1970;
+        }
+        return false;
+    }
+    disconnect();
+    return true;
 }

@@ -39,13 +39,14 @@ public:
     bool removeClient(Client * client);
     const std::string &getCachePath() const;
     void resetRequestSended();
-    bool haveUrlAndFrontendConnected();
-    bool isAlive();
+    bool haveUrlAndFrontendConnected() const;
+    bool isAlive() const;
     bool HttpReturnCode(const int &errorCode);
     bool backendError(const std::string &errorString);
-    virtual std::string getUrl();
+    virtual std::string getUrl() const;
     void parseNonHttpError(const Backend::NonHttpError &error);
     bool detectTimeout();
+    std::string getQuery() const;
 
     ssize_t socketRead(void *buffer, size_t size);
     bool socketWrite(const void *buffer, size_t size);
@@ -56,7 +57,6 @@ public:
     static std::unordered_map<std::string,Http *> duplicateOpen;
     std::string cachePath;
     #endif
-private:
     static char buffer[1024*1024];
 private:
     std::vector<Client *> clientsList;
