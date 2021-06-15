@@ -23,6 +23,7 @@ std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttps;
 uint32_t Backend::maxBackend=64;
 
 uint16_t Backend::https_portBE=0;
+const SSL_METHOD *Backend::meth=nullptr;
 
 Backend::Backend(BackendList * backendList) :
     http(nullptr),
@@ -30,7 +31,6 @@ Backend::Backend(BackendList * backendList) :
     wasTCPConnected(false),
     lastReceivedBytesTimestamps(0),
     backendList(backendList),
-    meth(nullptr),
     ctx(nullptr),
     ssl(nullptr)
 {
@@ -112,7 +112,6 @@ void Backend::closeSSL()
         SSL_free(ssl);
         ssl=nullptr;
     }
-    meth = TLS_client_method();
     if(meth!=nullptr)
     {
         //delete meth;->Address 0x509cf60 is in a r-- mapped file /usr/lib/x86_64-linux-gnu/libssl.so.1.1 segment
@@ -524,7 +523,6 @@ void Backend::startHttps()
     #endif
 
     /* ------------------------------------- */
-    meth = TLS_client_method();
     ctx = SSL_CTX_new(meth);
     if (ctx==nullptr)
     {

@@ -38,6 +38,7 @@ int main(int argc, char *argv[])
     /* Init openssl */
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
+    Backend::meth = TLS_client_method();
 
     /* Catch Signal Handler SIGPIPE */
     if(signal(SIGPIPE, signal_callback_handler)==SIG_ERR)
