@@ -115,7 +115,7 @@ void Backend::closeSSL()
     meth = TLS_client_method();
     if(meth!=nullptr)
     {
-        delete meth;
+        //delete meth;->Address 0x509cf60 is in a r-- mapped file /usr/lib/x86_64-linux-gnu/libssl.so.1.1 segment
         meth=nullptr;
     }
     if(ctx!=NULL)
