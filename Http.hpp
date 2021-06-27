@@ -5,7 +5,7 @@
 #include <vector>
 #include <netinet/in.h>
 #include <unordered_map>
-#ifdef MAXFILESIZE
+#ifdef DEBUGFASTCGI
 #include <unordered_set>
 #endif
 
@@ -30,8 +30,8 @@ public:
     void readyToWrite();
     void flushRead();
     void disconnectFrontend();
-    virtual std::unordered_map<std::string,Http *> &pendingList();
-    void disconnectBackend();
+    virtual std::unordered_map<std::string,Http *> &pathToHttpList();
+    void disconnectBackend(const bool fromDestructor=false);
     const int &getAction() const;
     int write(const char * const data, const size_t &size);
     static std::string timestampsToHttpDate(const int64_t &time);
@@ -51,18 +51,13 @@ public:
     ssize_t socketRead(void *buffer, size_t size);
     bool socketWrite(const void *buffer, size_t size);
 public:
-    static std::unordered_map<std::string,Http *> pathToHttp;
+    static std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp;
     static int fdRandom;
-    #ifdef MAXFILESIZE
-    static std::unordered_map<std::string,Http *> duplicateOpen;
-    std::string cachePath;
-    #endif
     static char buffer[1024*1024];
-private:
-    std::vector<Client *> clientsList;
-    #ifndef MAXFILESIZE
     std::string cachePath;
-    #endif
+protected:
+    std::vector<Client *> clientsList;
+private:
     Cache *tempCache;
     Cache *finalCache;
     bool parsedHeader;
@@ -94,9 +89,11 @@ private:
     std::string etagBackend;
     std::string remoteAddr;
 protected:
+    Backend::BackendList * backendList;
     std::string host;
     std::string uri;
 public:
+    bool pending;
     bool requestSended;
     bool headerWriten;
     bool endDetected;
@@ -104,11 +101,18 @@ public:
     int64_t contentLengthPos;
     int64_t chunkLength;
     std::string chunkHeader;
+    static std::unordered_set<Http *> toDelete;
     #ifdef HTTPGZIP
     std::string contentEncoding;
     #endif
-private:
-    sockaddr_in6 m_socket;
+    #ifdef DEBUGFASTCGI
+    static std::unordered_set<Http *> toDebug;
+    void checkBackend();
+    #endif
+    #ifdef DEBUGFASTCGI
+protected:
+    sockaddr_in6 m_socket;//to found the debug backend list
+    #endif
 };
 
 #endif // HTTP_H

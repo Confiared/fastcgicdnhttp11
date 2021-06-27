@@ -22,6 +22,10 @@ std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttp;
 std::unordered_map<std::string,Backend::BackendList *> Backend::addressToHttps;
 uint32_t Backend::maxBackend=64;
 
+#ifdef DEBUGFASTCGI
+std::unordered_set<Backend *> Backend::toDebug;
+#endif
+
 uint16_t Backend::https_portBE=0;
 const SSL_METHOD *Backend::meth=nullptr;
 
@@ -34,17 +38,24 @@ Backend::Backend(BackendList * backendList) :
     ctx(nullptr),
     ssl(nullptr)
 {
+    #ifdef DEBUGFASTCGI
+    toDebug.insert(this);
+    #endif
     lastReceivedBytesTimestamps=Backend::currentTime();
     this->kind=EpollObject::Kind::Kind_Backend;
-
-    #ifdef MAXFILESIZE
-    fileGetCount=0;
-    byteReceived=0;
-    #endif
 }
 
 Backend::~Backend()
 {
+    #ifdef DEBUGFASTCGI
+    if(toDebug.find(this)!=toDebug.cend())
+        toDebug.erase(this);
+    else
+    {
+        std::cerr << "Backend Entry not found into global list, abort()" << std::endl;
+        abort();
+    }
+    #endif
     #ifdef DEBUGFASTCGI
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
@@ -165,7 +176,7 @@ void Backend::remoteSocketClosed()
                 while(index<backendList->pending.size())
                 {
                     Http *http=backendList->pending.at(index);
-                    http->backendError(error);
+                    http->backendError(error);//drop from list, then delete http
                     http->disconnectFrontend();
                     http->disconnectBackend();
                     index++;
@@ -181,7 +192,7 @@ void Backend::remoteSocketClosed()
         else
         {
             #ifdef DEBUGFASTCGI
-            std::cerr << __FILE__ << ":" << __LINE__ << " was TCP connected" << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " was TCP connected, backendList: " << (void *)backendList << ", backendList->busy.size(): " << std::to_string(backendList->busy.size()) << std::endl;
             #endif
             size_t index=0;
             while(index<backendList->busy.size())
@@ -189,7 +200,7 @@ void Backend::remoteSocketClosed()
                 if(backendList->busy.at(index)==this)
                 {
                     #ifdef DEBUGFASTCGI
-                    std::cerr << __FILE__ << ":" << __LINE__ << " located into busy to destroy" << std::endl;
+                    std::cerr << __FILE__ << ":" << __LINE__ << " located into busy to destroy: " << this << std::endl;
                     #endif
                     backendList->busy.erase(backendList->busy.cbegin()+index);
                     if(http!=nullptr)
@@ -242,11 +253,53 @@ void Backend::remoteSocketClosed()
                     }
                     if(backendList->busy.empty() && backendList->idle.empty() && backendList->pending.empty())
                     {
+                        #ifdef DEBUGFASTCGI
+                        std::string host="Unknown IPv6";
+                        char str[INET6_ADDRSTRLEN];
+                        if (inet_ntop(AF_INET6, &backendList->s.sin6_addr, str, INET6_ADDRSTRLEN) != NULL)
+                            host=str;
+                        std::cerr << __FILE__ << ":" << __LINE__ << " addressToHttp.erase(): " << host << std::endl;
+                        #endif
                         std::string addr((char *)&backendList->s.sin6_addr,16);
                         if(backendList->s.sin6_port == htobe16(80))
+                        {
+                            #ifdef DEBUGFASTCGI
+                            std::cerr << __FILE__ << ":" << __LINE__ << " addressToHttp.erase(): " << host << ":" << be16toh(backendList->s.sin6_port) << std::endl;
+                            if(addressToHttp.at(addr)!=backendList)
+                            {
+                                std::cerr << "intented erase backend list is not same than current (abort)" << std::endl;
+                                abort();
+                            }
+                            if(!addressToHttp.at(addr)->busy.empty() || !addressToHttp.at(addr)->idle.empty() || !addressToHttp.at(addr)->pending.empty())
+                            {
+                                std::cerr << "intented erase backend list have pending request (abort)" << std::endl;
+                                abort();
+                            }
+                            #endif
                             addressToHttp.erase(addr);
+                        }
                         else
+                        {
+                            #ifdef DEBUGFASTCGI
+                            std::cerr << __FILE__ << ":" << __LINE__ << " addressToHttp.erase(): " << host << ":" << be16toh(backendList->s.sin6_port) << std::endl;
+                            if(addressToHttps.at(addr)!=backendList)
+                            {
+                                std::cerr << "intented erase backend list is not same than current (abort)" << std::endl;
+                                abort();
+                            }
+                            if(!addressToHttps.at(addr)->busy.empty() || !addressToHttps.at(addr)->idle.empty() || !addressToHttps.at(addr)->pending.empty())
+                            {
+                                std::cerr << "intented erase backend list have pending request (abort)" << std::endl;
+                                abort();
+                            }
+                            if(be16toh(backendList->s.sin6_port)!=443)
+                            {
+                                std::cerr << "intented erase backend list have wrong port (abort)" << std::endl;
+                                abort();
+                            }
+                            #endif
                             addressToHttps.erase(addr);
+                        }
                     }
                     backendList=nullptr;
                     #ifdef DEBUGFASTCGI
@@ -256,8 +309,15 @@ void Backend::remoteSocketClosed()
                 }
                 index++;
             }
+            #ifdef DEBUGFASTCGI
+            if(index<backendList->busy.size())
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " found into busy" << std::endl;
+            else
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " NOT found into busy" << std::endl;
+            #endif
             index=0;
             if(backendList!=nullptr)
+            {
                 while(index<backendList->idle.size())
                 {
                     if(backendList->idle.at(index)==this)
@@ -267,6 +327,13 @@ void Backend::remoteSocketClosed()
                     }
                     index++;
                 }
+                #ifdef DEBUGFASTCGI
+                if(index<backendList->idle.size())
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " found into idle" << std::endl;
+                else
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " NOT found into idle" << std::endl;
+                #endif
+            }
         }
     }
 }
@@ -298,9 +365,9 @@ void Backend::downloadFinished()
             }
             index++;
         }
+        const std::string error("Tcp connect problem");
         if(!backendList->pending.empty() && backendList->busy.empty())
         {
-            const std::string error("Tcp connect problem");
             size_t index=0;
             while(index<backendList->pending.size())
             {
@@ -308,17 +375,20 @@ void Backend::downloadFinished()
                 http->backendError(error);
                 http->disconnectFrontend();
                 //http->disconnectBackend();-> no backend because pending
+                //delete http;
                 index++;
             }
         }
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
-        #endif
-        #ifdef DEBUGFASTCGI
-        std::cerr << "Backend::downloadFinished() NOT TRY AGAIN" << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " " << this << "Backend::downloadFinished() NOT TRY AGAIN" << std::endl;
         #endif
         http->backend=nullptr;
+        http->backendError(error);//disconnect client like http->disconnectFrontend();
+        //http->disconnectBackend();
+        //delete http;
         http=nullptr;
+        close();
+        remoteSocketClosed();
         return;
     }
     if(backendList->pending.empty())
@@ -334,48 +404,108 @@ void Backend::downloadFinished()
             index++;
         }
         #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cerr << __FILE__ << ":" << __LINE__ << " http: " << http << std::endl;
         #endif
         if(this->isValid())
             backendList->idle.push_back(this);
         #ifdef DEBUGFASTCGI
         std::cerr << this << " backend, " << http << ": http->backend=null + http=nullptr" << " " << __FILE__ << ":" << __LINE__ << " isValid: " << this->isValid() << std::endl;
         #endif
+        /** \todo fix clean client disconnection from here
+         *  void Http::disconnectBackend(const bool fromDestructor) if timeout before start download, have client list
+         *  **/
+        /*http->disconnectFrontend();
+         * ==30297==    at 0x55EF820: std::basic_ostream<char, std::char_traits<char> >& std::operator<< <char, std::char_traits<char>, std::allocator<char> >(std::basic_ostream<char, std::char_traits<char> >&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) (in /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.22)
+==30297==    by 0x12EE3B: Client::continueRead() (Client.cpp:1655)
+==30297==    by 0x12F6F6: Client::readyToWrite() (Client.cpp:1751)
+==30297==    by 0x123CE7: Client::parseEvent(epoll_event const&) (Client.cpp:100)
+==30297==    by 0x10DEB4: main (main.cpp:202)
+==30297==  Address 0x6624560 is 16 bytes inside a block of size 448 free'd
+==30297==    at 0x4C2D2DB: operator delete(void*) (vg_replace_malloc.c:576)
+==30297==    by 0x1357C1: Http::~Http() (Http.cpp:153)
+==30297==    by 0x10DD15: main (main.cpp:179)
+==30297==  Block was alloc'd at
+==30297==    at 0x4C2C21F: operator new(unsigned long) (vg_replace_malloc.c:334)
+==30297==    by 0x12C837: Client::dnsRight(sockaddr_in6 const&) (Client.cpp:1321)
+==30297==    by 0x1490D5: Dns::parseEvent(epoll_event const&) (Dns.cpp:402)
+==30297==    by 0x10DF90: main (main.cpp:224)
+*/
         http->backend=nullptr;
+        //http->disconnectBackend();->generate cache corruption
+        //delete http;
         http=nullptr;
     }
     else
     {
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
-        std::cerr << http << ": http->backend=null and !backendList->pending.empty()" << std::endl;
+        std::cerr << http << ": http->backend=null and !backendList->pending.empty() cachePath " << http->cachePath << std::endl;
         #endif
         http->backend=nullptr;
+        //http->disconnectBackend();->generate cache corruption
+        //delete http;-> generate crash
         http=nullptr;
         bool haveFound=false;
         bool haveUrlAndFrontendConnected=false;
         do
         {
             Http * httpToGet=backendList->pending.front();
+            #ifdef DEBUGFASTCGI
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+            #endif
+
+            #ifdef DEBUGFASTCGI
+            if(Http::toDebug.find(httpToGet)==Http::toDebug.cend())
+            {
+                std::cerr << __FILE__ << ":" << __LINE__ << ", try get from backend: " << this << " the http already deleted: " << httpToGet << " (abort)" << std::endl;
+                abort();
+            }
+            #endif
             backendList->pending.erase(backendList->pending.cbegin());
+            httpToGet->pending=true;
             haveUrlAndFrontendConnected=httpToGet->haveUrlAndFrontendConnected();
+            #ifdef DEBUGFASTCGI
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+            #endif
             if(haveUrlAndFrontendConnected)
             {
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << ", link backend: " << this << " with http " << httpToGet << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << ", link backend: " << this << " with http " << httpToGet << " old: " << http << std::endl;
+                #endif
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
                 #endif
                 http=httpToGet;
                 http->backend=this;
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
                 http->readyToWrite();
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
                 haveFound=true;
             }
             else
             {
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
                 httpToGet->backendError("Internal error, !haveUrlAndFrontendConnected");
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
                 httpToGet->disconnectFrontend();
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
                 httpToGet->disconnectBackend();
                 #ifdef DEBUGFASTCGI
-                std::cerr << __FILE__ << ":" << __LINE__ << ", http buggy, skipped: " << httpToGet << std::endl;
+                std::cerr << __FILE__ << ":" << __LINE__ << " " << httpToGet << ": cachePath " << httpToGet->cachePath << std::endl;
+                #endif
+                //delete httpToGet;
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << ", http buggy or without client, skipped: " << httpToGet << std::endl;
                 #endif
             }
         } while(haveUrlAndFrontendConnected==false && !backendList->pending.empty());
@@ -410,7 +540,7 @@ void Backend::downloadFinished()
     #endif
 }
 
-Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::unordered_map<std::string,BackendList *> &addressToList,bool &connectInternal)
+Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::unordered_map<std::string,BackendList *> &addressToList,bool &connectInternal,Backend::BackendList ** backendList)
 {
     connectInternal=true;
     std::string addr((char *)&s.sin6_addr,16);
@@ -418,6 +548,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
     if(addressToList.find(addr)!=addressToList.cend())
     {
         BackendList *list=addressToList[addr];
+        *backendList=list;
         if(!list->idle.empty())
         {
             //assign to idle backend and become busy
@@ -444,7 +575,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
                 }
                 newBackend->http=http;
                 #ifdef DEBUGFASTCGI
-                std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::endl;
+                std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::to_string(list->busy.size()) << "<" << std::to_string(Backend::maxBackend) << std::endl;
                 #endif
                 http->backend=newBackend;
 
@@ -453,6 +584,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
             }
             else
             {
+                http->pending=true;
                 list->pending.push_back(http);
                 //list busy
                 std::cerr << "backend busy on: ";
@@ -466,7 +598,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
                     else if(b->http==nullptr)
                         std::cerr << "no http";
                     else
-                        std::cerr << "url: " << b->http->getUrl();
+                        std::cerr << (void *)b << " " << (void *)http << " url: " << b->http->getUrl();
                     index++;
                 }
                 std::cerr << std::endl;
@@ -477,6 +609,7 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
     else
     {
         BackendList *list=new BackendList();
+        *backendList=list;
         memcpy(&list->s,&s,sizeof(sockaddr_in6));
 
         Backend *newBackend=new Backend(list);
@@ -487,7 +620,13 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
         }
         newBackend->http=http;
         #ifdef DEBUGFASTCGI
-        std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << std::endl;
+        {
+            std::string host="Unknown IPv6";
+            char str[INET6_ADDRSTRLEN];
+            if (inet_ntop(AF_INET6, &addr, str, INET6_ADDRSTRLEN) != NULL)
+                host=str;
+            std::cerr << http << ": http->backend=" << newBackend << " " << __FILE__ << ":" << __LINE__ << " isValid: " << newBackend->isValid() << " " << host << std::endl;
+        }
         #endif
         http->backend=newBackend;
 
@@ -501,9 +640,9 @@ Backend * Backend::tryConnectInternalList(const sockaddr_in6 &s,Http *http,std::
     return nullptr;
 }
 
-Backend * Backend::tryConnectHttp(const sockaddr_in6 &s,Http *http, bool &connectInternal)
+Backend * Backend::tryConnectHttp(const sockaddr_in6 &s,Http *http, bool &connectInternal,Backend::BackendList ** backendList)
 {
-    return tryConnectInternalList(s,http,addressToHttp,connectInternal);
+    return tryConnectInternalList(s,http,addressToHttp,connectInternal,backendList);
 }
 
 void Backend::startHttps()
@@ -573,7 +712,7 @@ void Backend::startHttps()
     {
         printf("SSL_set_fd failed");
         closeSSL();
-        #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
+        #if defined(DEBUGFILEOPEN)
         std::cerr << "Backend::startHttps(), fd: " << fd << ", err == SSL_ERROR_ZERO_RETURN" << std::endl;
         #endif
         Cache::closeFD(fd);
@@ -598,7 +737,7 @@ void Backend::startHttps()
             else if(err == SSL_ERROR_ZERO_RETURN) {
                 printf("SSL_connect: close notify received from peer");
                 closeSSL();
-                #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
+                #if defined(DEBUGFILEOPEN)
                 std::cerr << "Backend::startHttps(), fd: " << fd << ", err == SSL_ERROR_ZERO_RETURN" << std::endl;
                 #endif
                 Cache::closeFD(fd);
@@ -610,7 +749,7 @@ void Backend::startHttps()
                 printf("Error SSL_connect: %d", err);
                 perror("perror: ");
                 closeSSL();
-                #if defined(DEBUGFILEOPEN) || defined(MAXFILESIZE)
+                #if defined(DEBUGFILEOPEN)
                 std::cerr << "Backend::startHttps(), fd: " << fd << std::endl;
                 #endif
                 Cache::closeFD(fd);
@@ -623,18 +762,20 @@ void Backend::startHttps()
             #ifdef DEBUGHTTPS
             dump_cert_info(ssl, false);
             #else
-            #ifdef DEBUGFASTCGI
-            std::cerr << "problem with certificate" << std::endl;
-            #endif
+                #ifdef DEBUGFASTCGI
+                int ret=0;
+                int ret2=SSL_get_error(ssl,ret);
+                std::cerr << "problem with certificate " << ret << " " << ret2 << std::endl;
+                #endif
             #endif
             break;
         }
     }
 }
 
-Backend * Backend::tryConnectHttps(const sockaddr_in6 &s,Http *http, bool &connectInternal)
+Backend * Backend::tryConnectHttps(const sockaddr_in6 &s,Http *http, bool &connectInternal,Backend::BackendList ** backendList)
 {
-    return tryConnectInternalList(s,http,addressToHttps,connectInternal);
+    return tryConnectInternalList(s,http,addressToHttps,connectInternal,backendList);
 }
 
 #ifdef DEBUGHTTPS
@@ -766,7 +907,7 @@ void Backend::parseEvent(const epoll_event &event)
     if(event.events & EPOLLIN)
     {
         #ifdef DEBUGFASTCGI
-        //std::cout << "EPOLLIN" << std::endl;
+        //std::cout << "Backend EPOLLIN" << std::endl;
         #endif
         if(http!=nullptr)
             http->readyToRead();
@@ -781,7 +922,7 @@ void Backend::parseEvent(const epoll_event &event)
     if(event.events & EPOLLOUT)
     {
         /*#ifdef DEBUGFASTCGI
-        std::cout << "EPOLLOUT" << std::endl;
+        std::cout << "Backend EPOLLOUT" << std::endl;
         #endif*/
         if(ssl==nullptr && https)
             startHttps();
@@ -792,7 +933,7 @@ void Backend::parseEvent(const epoll_event &event)
     if(event.events & EPOLLHUP)
     {
         #ifdef DEBUGFASTCGI
-        std::cout << "EPOLLHUP" << std::endl;
+        std::cout << "Backend EPOLLHUP" << std::endl;
         #endif
         remoteSocketClosed();
         //do client reject
@@ -800,21 +941,21 @@ void Backend::parseEvent(const epoll_event &event)
     if(event.events & EPOLLRDHUP)
     {
         #ifdef DEBUGFASTCGI
-        std::cout << "EPOLLRDHUP" << std::endl;
+        std::cout << "Backend EPOLLRDHUP" << std::endl;
         #endif
         remoteSocketClosed();
     }
     if(event.events & EPOLLET)
     {
         #ifdef DEBUGFASTCGI
-        std::cout << "EPOLLET" << std::endl;
+        std::cout << "Backend EPOLLET" << std::endl;
         #endif
         remoteSocketClosed();
     }
     if(event.events & EPOLLERR)
     {
         #ifdef DEBUGFASTCGI
-        std::cout << "EPOLLERR" << std::endl;
+        std::cout << "Backend EPOLLERR" << std::endl;
         #endif
         remoteSocketClosed();
     }
@@ -859,14 +1000,6 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
                 std::cerr << this << " " << "SSL_read return -1 with errno " << errno << std::endl;
             return -1;
         }
-        #ifdef MAXFILESIZE
-        byteReceived+=readen;
-        if(byteReceived>100000000)
-        {
-            std::cerr << this << " " << "Byte received from SSL is > 100MB (abort)" << std::endl;
-            abort();
-        }
-        #endif
         /*#ifdef DEBUGFASTCGI
         std::cout << "Socket byte read: " << readen << std::endl;
         std::cerr << "Client Received " << readen << " chars - '" << std::string((char *)buffer,readen) << "'" << std::endl;
@@ -899,14 +1032,6 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
     else
     {
         const ssize_t &s=::read(fd,buffer,size);
-        #ifdef MAXFILESIZE
-        byteReceived+=s;
-        if(byteReceived>100000000)
-        {
-            std::cerr << "Byte received from SSL is > 100MB (abort)" << std::endl;
-            abort();
-        }
-        #endif
         /*#ifdef DEBUGFASTCGI
         std::cout << "Socket byte read: " << s << std::endl;
         #endif*/
@@ -918,16 +1043,6 @@ ssize_t Backend::socketRead(void *buffer, size_t size)
 
 bool Backend::socketWrite(const void *buffer, size_t size)
 {
-    #ifdef MAXFILESIZE
-    fileGetCount++;
-    if(fileGetCount>500)
-    {
-        std::cerr << this << " " << "socketRead() fileGetCount>500" << std::endl;
-        close();
-        errno=0;
-        return false;
-    }
-    #endif
     #ifdef DEBUGFASTCGI
     std::cout << this << " " << "Try socket write: " << size << std::endl;
     if(http==nullptr)
@@ -952,17 +1067,6 @@ bool Backend::socketWrite(const void *buffer, size_t size)
         this->bufferSocket+=std::string((char *)buffer,size);
         return true;
     }
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << this << " " << "too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     ssize_t sizeW=-1;
     if(ssl!=nullptr)
     {
@@ -999,17 +1103,6 @@ bool Backend::socketWrite(const void *buffer, size_t size)
         #endif
         sizeW=::write(fd,buffer,size);
     }
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << this << " " << "too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef DEBUGFASTCGI
     std::cout << "Socket Writed bytes: " << size << std::endl;
     #endif
@@ -1060,12 +1153,13 @@ bool Backend::detectTimeout()
     #endif
     std::cerr << "Backend::detectTimeout() timeout while downloading " << http->getUrl() << " from " << http << " (backend " << this << ")" << std::endl;
     if(http!=nullptr)
+    {
         http->backendError("Timeout");
-    if(http!=nullptr)
         http->disconnectFrontend();
-    if(http!=nullptr)
         http->disconnectBackend();
+    }
     close();
+    remoteSocketClosed();//else backend is into busy and bug all
     //abort();
     return true;
 }
@@ -1073,10 +1167,13 @@ bool Backend::detectTimeout()
 std::string Backend::getQuery() const
 {
     std::string ret;
+    char buffer[32];
+    std::snprintf(buffer,sizeof(buffer),"%p",(void *)this);
+    ret+=std::string(buffer)+" ";
     if(http==nullptr)
         ret+="not alive";
     else
-        ret+="alive on "+http->getUrl();
+        ret+="alive on "+http->getUrl()+" "+std::to_string((uint64_t)http);
     ret+=" last byte "+std::to_string(lastReceivedBytesTimestamps);
     if(wasTCPConnected)
         ret+=" wasTCPConnected";

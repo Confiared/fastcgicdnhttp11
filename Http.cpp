@@ -1,4 +1,7 @@
 #include "Http.hpp"
+#ifdef DEBUGFASTCGI
+#include "Https.hpp"
+#endif
 #include "Client.hpp"
 #include "Cache.hpp"
 #include "Backend.hpp"
@@ -13,12 +16,14 @@
 #include <chrono>
 
 #ifdef DEBUGFASTCGI
+#include <arpa/inet.h>
 #include <sys/time.h>
 #endif
 
-#ifdef MAXFILESIZE
-std::unordered_map<std::string,Http *> Http::duplicateOpen;
+#ifdef DEBUGFASTCGI
+std::unordered_set<Http *> Http::toDebug;
 #endif
+std::unordered_set<Http *> Http::toDelete;
 
 //ETag -> If-None-Match
 const char rChar[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
@@ -41,23 +46,33 @@ Http::Http(const int &cachefd, //0 if no old cache file found
     contentwritten(0),
     http_code(0),
     parsing(Parsing_None),
+    pending(false),
     requestSended(false),
     headerWriten(false),
     backend(nullptr),
     contentLengthPos(-1),
     chunkLength(-1)
 {
+    #ifdef DEBUGFASTCGI
+    toDebug.insert(this);
+    #endif
     endDetected=false;
     lastReceivedBytesTimestamps=Backend::currentTime();
     #ifdef DEBUGFASTCGI
-    std::cerr << "contructor " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
+    if(&pathToHttpList()==&Http::pathToHttp)
+        std::cerr << "contructor http " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
+    else
+        std::cerr << "contructor https " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
     if(cachePath.empty())
+    {
         std::cerr << "critical error cachePath.empty() " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
+        abort();
+    }
     #endif
     if(cachefd<=0)
     {
         #ifdef DEBUGFASTCGI
-        std::cerr << "Http::Http()cachefd==0 then tempCache(nullptr): " << this << std::endl;
+        std::cerr << "Http::Http() cachefd==0 then tempCache(nullptr): " << this << std::endl;
         #endif
     }
     else
@@ -79,19 +94,70 @@ Http::Http(const int &cachefd, //0 if no old cache file found
 Http::~Http()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << "destructor " << this << "uri: " << uri<< ": " << __FILE__ << ":" << __LINE__ << std::endl;
+    if(toDebug.find(this)!=toDebug.cend())
+        toDebug.erase(this);
+    else
+    {
+        std::cerr << "Http Entry not found into global list, abort()" << std::endl;
+        abort();
+    }
     #endif
-    std::cerr << "Http::~Http(): " << this << std::endl;
+    #ifdef DEBUGFASTCGI
+    std::cerr << "Http::~Http(): destructor " << this << "uri: " << uri<< ": " << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif
+    Backend *b=backend;
     delete tempCache;
     tempCache=nullptr;
     disconnectFrontend();
-    disconnectBackend();
+    disconnectBackend(true);
     for(Client * client : clientsList)
     {
         client->writeEnd();
         client->disconnect();
     }
     clientsList.clear();
+
+    #ifdef DEBUGFASTCGI
+    for(const Client * client : Client::clients)
+    {
+        if(client->http==this)
+        {
+            std::cerr << "Http::~Http(): destructor, remain client on this http " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+    }
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Http::pathToHttp;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Http::pathToHttp at " << n.first << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+    }
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Https::pathToHttps;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Https::pathToHttps at " << n.first << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+    }
+    if(Http::toDelete.find(this)!=Http::toDelete.cend())
+    {
+        std::cerr << "Http::~Http(): destructor post opt can't have this into Http::toDelete " << this << __FILE__ << ":" << __LINE__ << std::endl;
+        abort();
+    }
+    if(b!=nullptr)
+    {
+        if(b->http==this)
+        {
+            std::cerr << "Http::~Http(): destructor post backend " << (void *)b << " remain on this Http " << this << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+    }
+    #endif
 }
 
 bool Http::tryConnect(const sockaddr_in6 &s,const std::string &host,const std::string &uri,const std::string &etag)
@@ -101,6 +167,7 @@ bool Http::tryConnect(const sockaddr_in6 &s,const std::string &host,const std::s
     std::cerr << std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count() << " try connect " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
     if(etag.find('\0')!=std::string::npos)
         std::cerr << "etag contain \\0 abort" << __FILE__ << ":" << __LINE__ << std::endl;
+    m_socket=s;
     #endif
     this->host=host;
     this->uri=uri;
@@ -111,11 +178,84 @@ bool Http::tryConnect(const sockaddr_in6 &s,const std::string &host,const std::s
 bool Http::tryConnectInternal(const sockaddr_in6 &s)
 {
     bool connectInternal=false;
-    backend=Backend::tryConnectHttp(s,this,connectInternal);
+    backend=Backend::tryConnectHttp(s,this,connectInternal,&backendList);
     if(backend==nullptr)
     {
+        std::string host2="Unknown IPv6";
+        char str[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &m_socket.sin6_addr, str, INET6_ADDRSTRLEN) != NULL)
+            host2=str;
         const auto p1 = std::chrono::system_clock::now();
-        std::cerr << std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count() << " " << this << ": unable to get backend for " << host << uri << std::endl;
+        std::cerr << std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count() << " " << this << ": unable to get backend for " << host << uri << " Backend::addressToHttp[" << host2 << "]" << std::endl;
+        #ifdef DEBUGFASTCGI
+        //check here if not backend AND free backend or backend count < max
+        std::string addr((char *)&m_socket.sin6_addr,16);
+        //if have already connected backend on this ip
+        if(Backend::addressToHttp.find(addr)!=Backend::addressToHttp.cend())
+        {
+            Backend::BackendList *list=Backend::addressToHttp[addr];
+            if(!list->idle.empty())
+            {
+                std::cerr << this << " backend==nullptr and !list->idle.empty(), isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort)" << std::endl;
+                abort();
+            }
+            if(list->busy.size()<Backend::maxBackend)
+            {
+                std::cerr << this << " backend==nullptr and list->busy.size()<Backend::maxBackend, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort)" << std::endl;
+                abort();
+            }
+            unsigned int index=0;
+            while(index<list->pending.size())
+            {
+                if(list->pending.at(index)==this)
+                    break;
+                index++;
+            }
+            if(index>=list->pending.size())
+            {
+                std::cerr << this << " backend==nullptr and this " << this << " not found into pending, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+        }
+        else if(Backend::addressToHttps.find(addr)!=Backend::addressToHttps.cend())
+        {
+            Backend::BackendList *list=Backend::addressToHttps[addr];
+            if(!list->idle.empty())
+            {
+                std::cerr << this << " backend==nullptr and !list->idle.empty(), isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+            if(list->busy.size()<Backend::maxBackend)
+            {
+                std::cerr << this << " backend==nullptr and list->busy.size()<Backend::maxBackend, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+            unsigned int index=0;
+            while(index<list->pending.size())
+            {
+                if(list->pending.at(index)==this)
+                    break;
+                index++;
+            }
+            if(index>=list->pending.size())
+            {
+                std::cerr << this << " backend==nullptr and this " << this << " not found into pending, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+        }
+        else
+        {
+            std::string host="Unknown IPv6";
+            std::string host2="Unknown IPv6";
+            char str[INET6_ADDRSTRLEN];
+            if (inet_ntop(AF_INET6, &m_socket.sin6_addr, str, INET6_ADDRSTRLEN) != NULL)
+                host=str;
+            if (inet_ntop(AF_INET6, &m_socket.sin6_addr, str, INET6_ADDRSTRLEN) != NULL)
+                host2=str;
+            std::cerr << this << " backend==nullptr and no backend list found, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " " << host << " " << host2 << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+        #endif
     }
     #ifdef DEBUGFASTCGI
     std::cerr << this << ": http->backend=" << backend << std::endl;
@@ -143,14 +283,14 @@ void Http::resetRequestSended()
 
 void Http::sendRequest()
 {
-    #ifdef DEBUGFASTCGI
+    //reset lastReceivedBytesTimestamps when come from busy to pending
+    lastReceivedBytesTimestamps=Backend::currentTime();
 
-    struct timeval tv;
     #ifdef DEBUGFASTCGI
+    struct timeval tv;
     gettimeofday(&tv,NULL);
     std::cerr << "[" << tv.tv_sec << "] ";
     std::cerr << "Http::sendRequest() " << this << " " << __FILE__ << ":" << __LINE__ << " uri: " << uri << std::endl;
-    #endif
     if(uri.empty())
     {
         std::cerr << "Http::readyToWrite(): but uri.empty()" << std::endl;
@@ -161,11 +301,11 @@ void Http::sendRequest()
     requestSended=true;
     if(etagBackend.empty())
     {
-        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\nEPNOERFT: ysff43Uy\n"
+        std::string h(std::string("GET ")+uri+" HTTP/1.1\r\nHost: "+host+"\r\nEPNOERFT: ysff43Uy\r\n"
               #ifdef HTTPGZIP
-              "Accept-Encoding: gzip\n"+
+              "Accept-Encoding: gzip\r\n"+
               #endif
-                      "\n");
+                      "\r\n");
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         //std::cerr << h << std::endl;
@@ -175,11 +315,11 @@ void Http::sendRequest()
     }
     else
     {
-        std::string h(std::string("GET ")+uri+" HTTP/1.1\nHOST: "+host+"\nEPNOERFT: ysff43Uy\nIf-None-Match: "+etagBackend+"\n"
+        std::string h(std::string("GET ")+uri+" HTTP/1.1\r\nHost: "+host+"\r\nEPNOERFT: ysff43Uy\r\nIf-None-Match: "+etagBackend+"\r\n"
               #ifdef HTTPGZIP
-              "Accept-Encoding: gzip\n"+
+              "Accept-Encoding: gzip\r\n"+
               #endif
-                      "\n");
+                      "\r\n");
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         //std::cerr << h << std::endl;
@@ -207,46 +347,6 @@ void Http::readyToRead()
     //::read(Http::buffer
 
     //load into buffer the previous content
-    #ifdef MAXFILESIZE
-    if(finalCache!=nullptr)
-    {
-        struct stat sb;
-        int rstat=fstat(finalCache->getFD(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__;
-            std::cerr << " finalCache fd: " << finalCache->getFD();
-            std::cerr << std::endl;
-            abort();
-        }
-    }
-    if(tempCache!=nullptr)
-    {
-        struct stat sb;
-        int rstat=fstat(tempCache->getFD(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__;
-            std::cerr << " tempCache fd: " << tempCache->getFD();
-            std::cerr << std::endl;
-            abort();
-        }
-    }
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__;
-            if(finalCache!=nullptr)
-                std::cerr << " finalCache fd: " << finalCache->getFD();
-            if(tempCache!=nullptr)
-                std::cerr << " tempCache fd: " << tempCache->getFD();
-            std::cerr << std::endl;
-            abort();
-        }
-    }
-    #endif
 
     if(backend!=nullptr && /*if file end send*/ endDetected)
     {
@@ -269,115 +369,27 @@ void Http::readyToRead()
     ssize_t readSize=0;
     do
     {
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         errno=0;
         const ssize_t size=socketRead(buffer+offset,sizeof(buffer)-offset);
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         readSize=size;
         #ifdef DEBUGFASTCGI
-        std::cout << __FILE__ << ":" << __LINE__ << std::endl;
+        std::cout << __FILE__ << ":" << __LINE__ << " " << readSize << std::endl;
         #endif
         if(size>0)
         {
-            #ifdef MAXFILESIZE
-            {
-                struct stat sb;
-                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                    abort();
-                }
-            }
-            #endif
             lastReceivedBytesTimestamps=Backend::currentTime();
             //std::cout << std::string(buffer,size) << std::endl;
             if(parsing==Parsing_Content)
             {
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    const int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 write(buffer,size);
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    const int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 if(endDetected)
                     return;
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
             }
             else
             {
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 uint16_t pos=0;
                 if(http_code==0)
                 {
-                    #ifdef MAXFILESIZE
-                    {
-                        struct stat sb;
-                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                        if(rstat==0 && sb.st_size>100000000)
-                        {
-                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                            abort();
-                        }
-                    }
-                    #endif
                     //HTTP/1.1 200 OK
                     void *fh=nullptr;
                     while(pos<size && buffer[pos]!='\n')
@@ -392,17 +404,6 @@ void Http::readyToRead()
                             }
                             else
                             {
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
                                 c=0x00;
                                 http_code=atoi((char *)fh);
                                 #ifdef DEBUGFASTCGI
@@ -416,17 +417,6 @@ void Http::readyToRead()
                                     #ifdef DEBUGFASTCGI
                                     std::cout << __FILE__ << ":" << __LINE__ << std::endl;
                                     #endif
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        struct stat sb;
-                                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                        if(rstat==0 && sb.st_size>100000000)
-                                        {
-                                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            abort();
-                                        }
-                                    }
-                                    #endif
                                     return;
                                 }
                                 pos++;
@@ -436,17 +426,6 @@ void Http::readyToRead()
                             pos++;
                     }
                 }
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 if(http_code!=200)
                 {
                     flushRead();
@@ -459,47 +438,14 @@ void Http::readyToRead()
                 std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
                 #endif
                 pos++;
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
 
                 parsing=Parsing_HeaderVar;
                 uint16_t pos2=pos;
                 //content-length: 5000
                 if(http_code!=0)
                 {
-                    #ifdef MAXFILESIZE
-                    {
-                        struct stat sb;
-                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                        if(rstat==0 && sb.st_size>100000000)
-                        {
-                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                            abort();
-                        }
-                    }
-                    #endif
                     while(pos<size)
                     {
-                        #ifdef MAXFILESIZE
-                        {
-                            struct stat sb;
-                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                            if(rstat==0 && sb.st_size>100000000)
-                            {
-                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                abort();
-                            }
-                        }
-                        #endif
                         char &c=buffer[pos];
                         if(c==':' && parsing==Parsing_HeaderVar)
                         {
@@ -597,31 +543,9 @@ void Http::readyToRead()
                             else
                                 pos++;
                             pos2=pos;
-                            #ifdef MAXFILESIZE
-                            {
-                                struct stat sb;
-                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                if(rstat==0 && sb.st_size>100000000)
-                                {
-                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                            }
-                            #endif
                         }
                         else if(c=='\n' || c=='\r')
                         {
-                            #ifdef MAXFILESIZE
-                            {
-                                struct stat sb;
-                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                if(rstat==0 && sb.st_size>100000000)
-                                {
-                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                            }
-                            #endif
                             if(pos==pos2 && parsing==Parsing_HeaderVar)
                             {
                                 //end of header
@@ -661,33 +585,10 @@ void Http::readyToRead()
                                 #ifdef DEBUGFASTCGI
                                 std::cout << "open((cachePath+.tmp).c_str() " << (cachePath+".tmp") << std::endl;
                                 #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    if (stat((cachePath+".tmp").c_str(), &sb) == 0)
-                                        std::cout << "delete before open " << (cachePath+".tmp") << " with size of " << sb.st_size << std::endl;
-                                    if(Http::duplicateOpen.find(cachePath+".tmp")!=Http::duplicateOpen.cend())
-                                    {
-                                        std::cerr << "duplicate open same file (abort) " << this << " " << getUrl() << " vs " << Http::duplicateOpen.at(cachePath+".tmp")->getUrl() << " " << Http::duplicateOpen.at(cachePath+".tmp") << std::endl;
-                                        //abort();
-                                    }
-                                }
-                                #endif
                                 ::unlink((cachePath+".tmp").c_str());
                                 int cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
                                 if(cachefd==-1)
                                 {
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        struct stat sb;
-                                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                        if(rstat==0 && sb.st_size>100000000)
-                                        {
-                                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            abort();
-                                        }
-                                    }
-                                    #endif
                                     if(errno==2)
                                     {
                                         ::mkdir("cache/",S_IRWXU);
@@ -697,28 +598,10 @@ void Http::readyToRead()
                                             const std::string basePath=cachePath.substr(0,n);
                                             mkdir(basePath.c_str(),S_IRWXU);
                                         }
-                                        #ifdef MAXFILESIZE
-                                        if(Http::duplicateOpen.find(cachePath+".tmp")!=Http::duplicateOpen.cend())
-                                        {
-                                            std::cerr << "duplicate open same file (abort)" << std::endl;
-                                            abort();
-                                        }
-                                        #endif
                                         ::unlink((cachePath+".tmp").c_str());
                                         cachefd = open((cachePath+".tmp").c_str(), O_RDWR | O_CREAT | O_TRUNC/* | O_NONBLOCK*/, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
                                         if(cachefd==-1)
                                         {
-                                            #ifdef MAXFILESIZE
-                                            {
-                                                struct stat sb;
-                                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                                if(rstat==0 && sb.st_size>100000000)
-                                                {
-                                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                    abort();
-                                                }
-                                            }
-                                            #endif
                                             #ifdef DEBUGFASTCGI
                                             std::cout << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
                                             #endif
@@ -735,91 +618,18 @@ void Http::readyToRead()
                                             #ifdef DEBUGFASTCGI
                                             std::cout << __FILE__ << ":" << __LINE__ << std::endl;
                                             #endif
-                                            #ifdef MAXFILESIZE
-                                            {
-                                                struct stat sb;
-                                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                                if(rstat==0 && sb.st_size>100000000)
-                                                {
-                                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                    abort();
-                                                }
-                                            }
-                                            #endif
                                             return;
                                         }
                                         else
                                         {
-                                            #ifdef MAXFILESIZE
-                                            {
-                                                unsigned int index=0;
-                                                while(index<clientsList.size())
-                                                {
-                                                    if(clientsList.at(index)->getFD()==cachefd)
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than cachefd " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                    index++;
-                                                }
-                                            }
-                                            #endif
                                             Cache::newFD(cachefd,this,EpollObject::Kind::Kind_Cache);
-                                            #ifdef MAXFILESIZE
-                                            {
-                                                unsigned int index=0;
-                                                while(index<clientsList.size())
-                                                {
-                                                    if(clientsList.at(index)->getFD()==cachefd)
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than cachefd " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                    index++;
-                                                }
-                                            }
-                                            #endif
-                                            #ifdef MAXFILESIZE
-                                            {
-                                                struct stat sb;
-                                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                                if(rstat==0 && sb.st_size>100000000)
-                                                {
-                                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                    abort();
-                                                }
-                                            }
-                                            #endif
-                                            #ifdef MAXFILESIZE
-                                            if(Http::duplicateOpen.find(cachePath+".tmp")==Http::duplicateOpen.cend())
-                                                Http::duplicateOpen[cachePath+".tmp"]=this;
-                                            else
-                                                std::cerr << "Http::duplicateOpen duplicate insert: " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            std::cout << "open((cachePath+.tmp).c_str() " << (cachePath+".tmp") << " for " << host << uri << " with FD " << cachefd << std::endl;
-                                            #endif
                                             #ifdef DEBUGFILEOPEN
                                             std::cerr << "Http::readyToRead() open: " << cachePath << ", fd: " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
                                             #endif
                                         }
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                     }
                                     else
                                     {
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                         #ifdef DEBUGFASTCGI
                                         std::cout << "open((cachePath+.tmp).c_str() failed " << (cachePath+".tmp") << " errno " << errno << std::endl;
                                         #endif
@@ -828,113 +638,21 @@ void Http::readyToRead()
                                         #ifdef DEBUGFASTCGI
                                         std::cout << __FILE__ << ":" << __LINE__ << std::endl;
                                         #endif
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                         return;
                                     }
                                 }
                                 else
                                 {
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        unsigned int index=0;
-                                        while(index<clientsList.size())
-                                        {
-                                            if(clientsList.at(index)->getFD()==cachefd)
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than cachefd " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            index++;
-                                        }
-                                    }
-                                    #endif
                                     Cache::newFD(cachefd,this,EpollObject::Kind::Kind_Cache);
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        unsigned int index=0;
-                                        while(index<clientsList.size())
-                                        {
-                                            if(clientsList.at(index)->getFD()==cachefd)
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than cachefd " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            index++;
-                                        }
-                                    }
-                                    #endif
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        struct stat sb;
-                                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                        if(rstat==0 && sb.st_size>100000000)
-                                        {
-                                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            abort();
-                                        }
-                                    }
-                                    #endif
-                                    #ifdef MAXFILESIZE
-                                    if(Http::duplicateOpen.find(cachePath+".tmp")==Http::duplicateOpen.cend())
-                                        Http::duplicateOpen[cachePath+".tmp"]=this;
-                                    else
-                                        std::cerr << "Http::duplicateOpen duplicate insert: " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    std::cout << "open((cachePath+.tmp).c_str() " << (cachePath+".tmp") << " for " << host << uri << " with FD " << cachefd << std::endl;
-                                    #endif
                                     #ifdef DEBUGFILEOPEN
                                     std::cerr << "Http::readyToRead() open: " << (cachePath+".tmp") << ", fd: " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
                                     #endif
                                 }
 
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(clientsList.at(index)->getFD()==cachefd)
-                                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than cachefd " << cachefd << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 tempCache=new Cache(cachefd);
                                 std::string r;
                                 char randomIndex[6];
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 read(Http::fdRandom,randomIndex,sizeof(randomIndex));
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 {
                                     size_t rIndex=0;
                                     while(rIndex<6)
@@ -946,32 +664,6 @@ void Http::readyToRead()
                                         rIndex++;
                                     }
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
 
                                 const int64_t &currentTime=time(NULL);
                                 if(!tempCache->set_access_time(currentTime))
@@ -986,17 +678,6 @@ void Http::readyToRead()
                                     clientsList.clear();
                                     return;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
                                 if(!tempCache->set_last_modification_time_check(currentTime))
                                 {
                                     tempCache->close();
@@ -1018,32 +699,6 @@ void Http::readyToRead()
                                     ::unlink((cachePath+".tmp").c_str());//drop corrupted cache
                                     return;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 if(!tempCache->set_http_code(http_code))
                                 {
                                     tempCache->close();
@@ -1056,32 +711,6 @@ void Http::readyToRead()
                                     clientsList.clear();
                                     return;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 if(!tempCache->set_ETagFrontend(r))//string of 6 char
                                 {
                                     tempCache->close();
@@ -1094,17 +723,6 @@ void Http::readyToRead()
                                     clientsList.clear();
                                     return;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
                                 if(!tempCache->set_ETagBackend(etagBackend))//at end seek to content pos
                                 {
                                     tempCache->close();
@@ -1117,32 +735,6 @@ void Http::readyToRead()
                                     clientsList.clear();
                                     return;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
 
                                 std::string header;
                                 switch(http_code)
@@ -1156,39 +748,10 @@ void Http::readyToRead()
                                     header="Status: 500 Internal Server Error\n";
                                     break;
                                 }
-                                #ifdef MAXFILESIZE
-                                if(header.size()>65536)
-                                {
-                                    std::cerr << "Header creation too big (" << header.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 if(contentsize>=0)
                                     header+="Content-Length: "+std::to_string(contentsize)+"\n";
                                 /*else
                                     header+="Transfer-Encoding: chunked\n";*/
-                                #ifdef MAXFILESIZE
-                                if(header.size()>65536)
-                                {
-                                    std::cerr << "Header creation too big (" << header.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                #endif
                                 #ifdef HTTPGZIP
                                 if(!contentEncoding.empty())
                                 {
@@ -1196,32 +759,10 @@ void Http::readyToRead()
                                     contentEncoding.clear();
                                 }
                                 #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 if(!contenttype.empty())
                                     header+="Content-Type: "+contenttype+"\n";
                                 else
                                     header+="Content-Type: text/html\n";
-                                #ifdef MAXFILESIZE
-                                if(header.size()>65536)
-                                {
-                                    std::cerr << "Header creation too big (" << header.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                #endif
                                 if(http_code==200)
                                 {
                                     const std::string date=timestampsToHttpDate(currentTime);
@@ -1232,69 +773,11 @@ void Http::readyToRead()
                                         "ETag: \""+r+"\"\n"
                                         "Access-Control-Allow-Origin: *\n";
                                 }
-                                #ifdef MAXFILESIZE
-                                if(r.size()>4096)
-                                {
-                                    std::cerr << "Header ETag creation too big (" << r.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                if(header.size()>65536)
-                                {
-                                    std::cerr << "Header creation too big (" << header.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                #endif
                                 #ifdef DEBUGFASTCGI
                                 //std::cout << "header: " << header << std::endl;
                                 #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 header+="\n";
                                 tempCache->seekToContentPos();
-                                #ifdef MAXFILESIZE
-                                if(header.size()>65536)
-                                {
-                                    std::cerr << "Header creation too big (" << header.size() << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                struct stat sb;
-                                const int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                if(rstat==0 && sb.st_size>100000000)
-                                {
-                                    std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                                    abort();
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 if(headerWriten)
                                 {
                                     std::cerr << "headerWriten already to true, critical error (abort)" << std::endl;
@@ -1302,50 +785,9 @@ void Http::readyToRead()
                                 }
                                 else
                                 {
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        struct stat sb;
-                                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                        if(rstat==0 && sb.st_size>100000000)
-                                        {
-                                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            abort();
-                                        }
-                                    }
-                                    #endif
-                                    #ifdef MAXFILESIZE
-                                    {
-                                        unsigned int index=0;
-                                        while(index<clientsList.size())
-                                        {
-                                            if(tempCache!=nullptr)
-                                                if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            if(finalCache!=nullptr)
-                                                if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                            index++;
-                                        }
-                                    }
-                                    #endif
                                     headerWriten=true;
                                     if(tempCache->write(header.data(),header.size())!=(ssize_t)header.size())
                                     {
-                                        #ifdef MAXFILESIZE
-                                        struct stat sb;
-                                        const int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                        if(rstat==0 && sb.st_size>100000000)
-                                        {
-                                            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                                            abort();
-                                        }
-                                        #endif
-                                        #ifdef MAXFILESIZE
-                                        if(Http::duplicateOpen.find(cachePath+".tmp")!=Http::duplicateOpen.cend())
-                                            Http::duplicateOpen.erase(cachePath+".tmp");
-                                        else
-                                            std::cerr << "Http::duplicateOpen erase not found: " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        #endif
                                         std::cerr << "Header creation failed, abort to debug " << __FILE__ << ":" << __LINE__ << host << uri << " " << cachePath << std::endl;
                                         tempCache->close();
                                         delete tempCache;
@@ -1355,46 +797,9 @@ void Http::readyToRead()
                                         for(Client * client : clientsList)
                                             client->writeEnd();
                                         clientsList.clear();
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                     }
                                     else
                                     {
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            unsigned int index=0;
-                                            while(index<clientsList.size())
-                                            {
-                                                if(tempCache!=nullptr)
-                                                    if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                if(finalCache!=nullptr)
-                                                    if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                index++;
-                                            }
-                                        }
-                                        #endif
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                         epoll_event event;
                                         memset(&event,0,sizeof(event));
                                         event.data.ptr = tempCache;
@@ -1403,103 +808,14 @@ void Http::readyToRead()
 
                                         //tempCache->setAsync(); -> to hard for now
 
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            unsigned int index=0;
-                                            while(index<clientsList.size())
-                                            {
-                                                if(tempCache!=nullptr)
-                                                    if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                if(finalCache!=nullptr)
-                                                    if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                index++;
-                                            }
-                                        }
-                                        #endif
                                         for(Client * client : clientsList)
                                             client->startRead(cachePath+".tmp",true);
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                     }
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
                                 break;
                             }
                             else
                             {
-                                #ifdef MAXFILESIZE
-                                {
-                                    unsigned int index=0;
-                                    while(index<clientsList.size())
-                                    {
-                                        if(tempCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        if(finalCache!=nullptr)
-                                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        index++;
-                                    }
-                                }
-                                #endif
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
                                 switch(parsing)
                                 {
                                     case Parsing_ContentLength:
@@ -1510,17 +826,6 @@ void Http::readyToRead()
                                         contentsize=value64;
                                         #ifdef DEBUGFASTCGI
                                         std::cout << "content-length: " << value64 << std::endl;
-                                        #endif
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
                                         #endif
                                     }
                                     break;
@@ -1539,17 +844,6 @@ void Http::readyToRead()
                                     //std::cout << "1b) " << std::string(buffer+pos2,pos-pos2) << std::endl;
                                     break;
                                 }
-                                #ifdef MAXFILESIZE
-                                {
-                                    struct stat sb;
-                                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                    if(rstat==0 && sb.st_size>100000000)
-                                    {
-                                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                        abort();
-                                    }
-                                }
-                                #endif
                                 parsing=Parsing_HeaderVar;
                             }
                             if(c=='\r')
@@ -1561,62 +855,11 @@ void Http::readyToRead()
                             }
                             else
                                 pos++;
-                            #ifdef MAXFILESIZE
-                            {
-                                unsigned int index=0;
-                                while(index<clientsList.size())
-                                {
-                                    if(tempCache!=nullptr)
-                                        if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    if(finalCache!=nullptr)
-                                        if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    index++;
-                                }
-                            }
-                            #endif
                             pos2=pos;
-                            #ifdef MAXFILESIZE
-                            {
-                                struct stat sb;
-                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                if(rstat==0 && sb.st_size>100000000)
-                                {
-                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                            }
-                            #endif
+
                         }
                         else
                         {
-                            #ifdef MAXFILESIZE
-                            {
-                                unsigned int index=0;
-                                while(index<clientsList.size())
-                                {
-                                    if(tempCache!=nullptr)
-                                        if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    if(finalCache!=nullptr)
-                                        if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    index++;
-                                }
-                            }
-                            #endif
-                            #ifdef MAXFILESIZE
-                            {
-                                struct stat sb;
-                                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                if(rstat==0 && sb.st_size>100000000)
-                                {
-                                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                    abort();
-                                }
-                            }
-                            #endif
                             //std::cout << c << std::endl;
                             if(c=='\r')
                             {
@@ -1628,88 +871,10 @@ void Http::readyToRead()
                             else
                                 pos++;
                         }
-                        #ifdef MAXFILESIZE
-                        {
-                            struct stat sb;
-                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                            if(rstat==0 && sb.st_size>100000000)
-                            {
-                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                abort();
-                            }
-                        }
-                        #endif
-                        #ifdef MAXFILESIZE
-                        {
-                            unsigned int index=0;
-                            while(index<clientsList.size())
-                            {
-                                if(tempCache!=nullptr)
-                                    if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                if(finalCache!=nullptr)
-                                    if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                                index++;
-                            }
-                        }
-                        #endif
-                    }
-                    #ifdef MAXFILESIZE
-                    {
-                        unsigned int index=0;
-                        while(index<clientsList.size())
-                        {
-                            if(tempCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            if(finalCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            index++;
-                        }
-                    }
-                    #endif
-                    #ifdef MAXFILESIZE
-                    {
-                        struct stat sb;
-                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                        if(rstat==0 && sb.st_size>100000000)
-                        {
-                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                            abort();
-                        }
-                    }
-                    #endif
-                }
-                #ifdef MAXFILESIZE
-                {
-                    unsigned int index=0;
-                    while(index<clientsList.size())
-                    {
-                        if(tempCache!=nullptr)
-                            if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                        if(finalCache!=nullptr)
-                            if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                        index++;
                     }
                 }
-                #endif
                 #ifdef DEBUGFASTCGI
                 std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                #endif
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
                 #endif
                 if(parsing==Parsing_Content)
                 {
@@ -1720,60 +885,12 @@ void Http::readyToRead()
                     if(size<=pos)
                         return;
                     const size_t finalSize=size-pos;
-                    #ifdef MAXFILESIZE
-                    if(finalSize>sizeof(buffer))
-                    {
-                        std::cerr << "Content block too big, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                    #endif
                     const size_t rSize=write(buffer+pos,finalSize);
                     if(endDetected || rSize<=0 || rSize!=finalSize)
                         return;
-                    #ifdef MAXFILESIZE
-                    {
-                        unsigned int index=0;
-                        while(index<clientsList.size())
-                        {
-                            if(tempCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            if(finalCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            index++;
-                        }
-                    }
-                    #endif
                 }
                 else
                 {
-                    #ifdef MAXFILESIZE
-                    {
-                        unsigned int index=0;
-                        while(index<clientsList.size())
-                        {
-                            if(tempCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==tempCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            if(finalCache!=nullptr)
-                                if(clientsList.at(index)->getFD()==finalCache->getFD())
-                                    std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                            index++;
-                        }
-                    }
-                    #endif
-                    #ifdef MAXFILESIZE
-                    {
-                        struct stat sb;
-                        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                        if(rstat==0 && sb.st_size>100000000)
-                        {
-                            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                            abort();
-                        }
-                    }
-                    #endif
                     switch(parsing)
                     {
                         case Parsing_HeaderVar:
@@ -1788,29 +905,7 @@ void Http::readyToRead()
                                     case Parsing_ContentLength:
                                     case Parsing_ContentType:
                                         parsing=Parsing_HeaderVar;
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                         readyToRead();
-                                        #ifdef MAXFILESIZE
-                                        {
-                                            struct stat sb;
-                                            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                                            if(rstat==0 && sb.st_size>100000000)
-                                            {
-                                                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                                                abort();
-                                            }
-                                        }
-                                        #endif
                                     break;
                                     default:
                                     std::cerr << "parsing var before abort over size: " << (int)parsing << std::endl;
@@ -1823,17 +918,6 @@ void Http::readyToRead()
                         break;
                     }
                 }
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 #ifdef DEBUGFASTCGI
                 std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
                 #endif
@@ -1850,32 +934,6 @@ void Http::readyToRead()
                     //if(var=="content-type")
                 }
             }*/
-            #ifdef MAXFILESIZE
-            {
-                unsigned int index=0;
-                while(index<clientsList.size())
-                {
-                    if(tempCache!=nullptr)
-                        if(clientsList.at(index)->getFD()==tempCache->getFD())
-                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                    if(finalCache!=nullptr)
-                        if(clientsList.at(index)->getFD()==finalCache->getFD())
-                            std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                    index++;
-                }
-            }
-            #endif
-            #ifdef MAXFILESIZE
-            {
-                struct stat sb;
-                int rstat=stat((cachePath+".tmp").c_str(),&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                    abort();
-                }
-            }
-            #endif
         }
         else
         {
@@ -1887,47 +945,10 @@ void Http::readyToRead()
             }
             break;
         }
-        #ifdef MAXFILESIZE
-        {
-            unsigned int index=0;
-            while(index<clientsList.size())
-            {
-                if(tempCache!=nullptr)
-                    if(clientsList.at(index)->getFD()==tempCache->getFD())
-                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than tempCache " << tempCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                if(finalCache!=nullptr)
-                    if(clientsList.at(index)->getFD()==finalCache->getFD())
-                        std::cerr << "Client " << clientsList.at(index) << ", have same FD: " << clientsList.at(index)->getFD() << " than finalCache " << finalCache->getFD() << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                index++;
-            }
-        }
-        #endif
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
     } while(readSize>0);
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef DEBUGFASTCGI
     std::cout << __FILE__ << ":" << __LINE__ << std::endl;
     #endif
@@ -1981,26 +1002,16 @@ bool Http::socketWrite(const void *buffer, size_t size)
     return backend->socketWrite(buffer,size);
 }
 
-std::unordered_map<std::string,Http *> &Http::pendingList()
+std::unordered_map<std::string,Http *> &Http::pathToHttpList()
 {
     return Http::pathToHttp;
 }
 
+//always call disconnectFrontend() before disconnectBackend()
 void Http::disconnectFrontend()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << "disconnectFrontend " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
-    #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-            abort();
-        }
-    }
+    std::cerr << "disconnectFrontend " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
     #endif
     for(Client * client : clientsList)
     {
@@ -2008,51 +1019,76 @@ void Http::disconnectFrontend()
         client->disconnect();
     }
     clientsList.clear();
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-            abort();
-        }
-    }
-    #endif
     //disconnectSocket();
 
     #ifdef DEBUGFASTCGI
+    for(const Client * client : Client::clients)
+    {
+        if(client->http==this)
+        {
+            std::cerr << "Http::~Http(): destructor, remain client on this http " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+    }
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     if(cachePath.empty())
-        std::cerr << "cachePath.empty()" << std::endl;
+        std::cerr << "Http::disconnectFrontend() cachePath.empty()" << std::endl;
     else
     {
-        std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+        std::unordered_map<std::string,Http *> &pathToHttp=pathToHttpList();
         if(pathToHttp.find(cachePath)==pathToHttp.cend())
             std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
     }
     #endif
-    if(!cachePath.empty())
+    /* generate: ./Backend.cpp:344 http 0x68d2630 is finished, will be destruct
+./Backend.cpp:421
+0x68d2630: http->backend=null and !backendList->pending.empty()
+Http::backendError(Internal error, !haveUrlAndFrontendConnected), but pathToHttp.find(cache/13C1FCE29C43F20D) not found (abort) 0x68d3920
+     *
+     * if(!cachePath.empty())
     {
         std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
         if(pathToHttp.find(cachePath)!=pathToHttp.cend())
+        {
+            std::cerr << "Http::disconnectFrontend(), erase pathToHttp.find(" << cachePath << ") " << this << std::endl;
             pathToHttp.erase(cachePath);
+        }
+        #ifdef DEBUGFASTCGI
+        else
+            std::cerr << this << " disconnectFrontend cachePath not found: " << cachePath << " " << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
     }
+    #ifdef DEBUGFASTCGI
+    else
+        std::cerr << this << " disconnectFrontend cachePath not found: " << cachePath << " " << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif*/
+    /* can be in progress on backend {
+        std::string cachePathTmp=cachePath+".tmp";
+        if(!cachePathTmp.empty())
+        {
+            std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+            if(pathToHttp.find(cachePathTmp)!=pathToHttp.cend())
+                pathToHttp.erase(cachePathTmp);
+            #ifdef DEBUGFASTCGI
+            else
+                std::cerr << this << " disconnectFrontend cachePath not found: " << cachePathTmp << " " << __FILE__ << ":" << __LINE__ << std::endl;
+            #endif
+        }
+        #ifdef DEBUGFASTCGI
+        else
+            std::cerr << this << " disconnectFrontend cachePath not found: " << cachePathTmp << " " << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
+    }*/
 
-    contenttype.clear();
     url.clear();
     headerBuff.clear();
-    #ifdef MAXFILESIZE
+
+    if(!contenttype.empty())
     {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-            abort();
-        }
+        contenttype.clear();
+        /*if(backend==nullptr && clientsList.empty() && !isAlive() && contenttype.empty())
+            Http::toDelete.insert(this);*/
     }
-    #endif
 }
 
 bool Http::haveUrlAndFrontendConnected() const
@@ -2117,16 +1153,24 @@ bool Http::backendError(const std::string &errorString)
 {
     for(Client * client : clientsList)
         client->httpError(errorString);
+    #ifdef DEBUGFASTCGI
+    std::cerr << __FILE__ << ":" << __LINE__ << " Http::backendError(" << errorString << "), erase pathToHttp.find(" << cachePath << ") " << this << std::endl;
+    #endif
     clientsList.clear();
     if(!cachePath.empty())
     {
-        std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+        std::unordered_map<std::string,Http *> &pathToHttp=pathToHttpList();
         #ifdef DEBUGFASTCGI
         if(tempCache!=nullptr)
         {
             if(pathToHttp.find(cachePath+".tmp")==pathToHttp.cend())
             {
                 std::cerr << "Http::backendError(" << errorString << "), but pathToHttp.find(" << cachePath+".tmp" << ") not found (abort) " << this << std::endl;
+                abort();
+            }
+            else if(pathToHttp.at(cachePath+".tmp")!=this)
+            {
+                std::cerr << "Http::backendError(" << errorString << "), but pathToHttp.find(" << cachePath+".tmp" << ")!=this (abort) " << this << std::endl;
                 abort();
             }
             else
@@ -2139,16 +1183,57 @@ bool Http::backendError(const std::string &errorString)
                 std::cerr << "Http::backendError(" << errorString << "), but pathToHttp.find(" << cachePath << ") not found (abort) " << this << std::endl;
                 abort();
             }
+            else if(pathToHttp.at(cachePath)!=this)
+            {
+                std::cerr << "Http::backendError(" << errorString << "), but pathToHttp.find(" << cachePath << ")!=this (abort) " << this << std::endl;
+                abort();
+            }
             else
                 std::cerr << "Http::backendError(" << errorString << "), erase pathToHttp.find(" << cachePath << ") " << this << std::endl;
         }
         #endif
-        if(finalCache!=nullptr)
+        //if(finalCache!=nullptr) -> file descriptor can be NOT open due to timeout while Http object is in pending queue
+        {
+            #ifdef DEBUGFASTCGI
+            if(&pathToHttp==&Http::pathToHttp)
+                std::cerr << "pathToHttp.erase(" << cachePath << ") " << this << std::endl;
+            if(&pathToHttp==&Https::pathToHttps)
+                std::cerr << "pathToHttps.erase(" << cachePath << ") " << this << std::endl;
+            #endif
             pathToHttp.erase(cachePath);
-        if(tempCache!=nullptr)
+        }
+        //if(tempCache!=nullptr) -> file descriptor can be NOT open due to timeout while Http object is in pending queue
+        {
+            #ifdef DEBUGFASTCGI
+            if(&pathToHttp==&Http::pathToHttp)
+                std::cerr << "pathToHttp.erase(" << cachePath+".tmp" << ") " << this << std::endl;
+            if(&pathToHttp==&Https::pathToHttps)
+                std::cerr << "pathToHttps.erase(" << cachePath+".tmp" << ") " << this << std::endl;
+            #endif
             pathToHttp.erase(cachePath+".tmp");
+        }
         cachePath.clear();
     }
+    #ifdef DEBUGFASTCGI
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Http::pathToHttp;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Http::pathToHttp at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                abort();
+            }
+    }
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Https::pathToHttps;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Https::pathToHttps at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                abort();
+            }
+    }
+    #endif
     return false;
     //disconnectSocket();
 }
@@ -2197,7 +1282,8 @@ void Http::parseNonHttpError(const Backend::NonHttpError &error)
     }
 }
 
-void Http::disconnectBackend()
+//always call disconnectFrontend() before disconnectBackend()
+void Http::disconnectBackend(const bool fromDestructor)
 {
     #ifdef DEBUGFASTCGI
     std::cerr << "Http::disconnectBackend() " << this << std::endl;
@@ -2206,17 +1292,6 @@ void Http::disconnectBackend()
     #ifdef DEBUGFILEOPEN
     std::cerr << "Http::disconnectBackend() post, finalCache close: " << finalCache << std::endl;
     #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(finalCache!=nullptr)
         finalCache->close();
     const char * const cstr=cachePath.c_str();
@@ -2224,38 +1299,8 @@ void Http::disconnectBackend()
     #ifdef DEBUGFILEOPEN
     std::cerr << "Http::disconnectBackend() post, tempCache close: " << tempCache << std::endl;
     #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(tempCache!=nullptr)
     {
-        #ifdef MAXFILESIZE
-        const auto p1 = std::chrono::system_clock::now();
-        std::cout << std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count() << " close((cachePath+.tmp).c_str() " << (cachePath+".tmp") << " for " << host << uri << std::endl;
-        if(Http::duplicateOpen.find(cachePath+".tmp")!=Http::duplicateOpen.cend())
-            Http::duplicateOpen.erase(cachePath+".tmp");
-        else
-            std::cerr << "Http::duplicateOpen erase not found: " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-        #endif
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                abort();
-            }
-        }
-        #endif
         const ssize_t &tempSize=tempCache->size();
         if(tempSize<25)
         {
@@ -2268,17 +1313,6 @@ void Http::disconnectBackend()
         std::cerr << (cachePath+".tmp") << " temp file size: " << tempSize << std::endl;
         #endif
         tempCache->close();
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort)" << std::endl;
-                abort();
-            }
-        }
-        #endif
         struct stat sb;
         const int rstat=stat((cachePath+".tmp").c_str(),&sb);
         if(rstat==0)
@@ -2315,23 +1349,15 @@ void Http::disconnectBackend()
                 else
                 {
                     std::cerr << "Too small to be saved (abort): " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                    #ifdef MAXFILESIZE
-                    abort();
-                    #else
                     ::unlink(cstr);
                     ::unlink((cachePath+".tmp").c_str());
-                    #endif
                 }
             }
             else
             {
                 std::cerr << "Too big to be saved (abort): " << cachePath+".tmp" << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                #ifdef MAXFILESIZE
-                abort();
-                #else
                 ::unlink(cstr);
                 ::unlink((cachePath+".tmp").c_str());
-                #endif
             }
         }
         else
@@ -2348,8 +1374,29 @@ void Http::disconnectBackend()
     #ifdef DEBUGFASTCGI
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " disconnect http " << this << " from backend " << backend << std::endl;
     #endif
+    //remove from busy, should never be into idle
     if(backend!=nullptr)
         backend->downloadFinished();
+    else
+    {
+        //remove from pending
+        if(backendList!=nullptr)
+        {
+            unsigned int index=0;
+            while(index<backendList->pending.size())
+            {
+                if(backendList->pending.at(index)==this)
+                    break;
+                index++;
+            }
+            if(index>=backendList->pending.size())
+                std::cerr << this << " backend==nullptr and this " << this << " not found into pending, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+            else
+                backendList->pending.erase(backendList->pending.cbegin()+index);
+        }
+        else
+            std::cerr << this << " backendList==nullptr and this " << this << " take care " << __FILE__ << ":" << __LINE__ << std::endl;
+    }
     #ifdef DEBUGFASTCGI
     if(backend!=nullptr && backend->http==this)
     {
@@ -2366,7 +1413,7 @@ void Http::disconnectBackend()
             if(b->http==this)
             {
                 std::cerr << this << ": backend->http==this, backend http: " << backend << " " << getUrl() << " (abort)" << std::endl;
-                abort();
+                //abort();//why this is an error?
             }
     }
     for( const auto& n : Backend::addressToHttps )
@@ -2376,18 +1423,186 @@ void Http::disconnectBackend()
             if(b->http==this)
             {
                 std::cerr << this << ": backend->http==this, backend https: " << backend << " " << getUrl() << " (abort)" << std::endl;
-                abort();
+                //abort();//why this is an error?
             }
     }
     #endif
     backend=nullptr;
+    backendList=nullptr;
+    //Http::toDelete.insert(this);
 
     #ifdef DEBUGFASTCGI
-    std::cerr << "disconnectBackend " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__ << std::endl;
+    std::cerr << "disconnectBackend " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__
+        << " backend: " << (void *)backend
+        << " clientsList size: " << std::to_string((int)clientsList.size())
+        << " isAlive(): " << (int)isAlive()
+        << " contenttype.size(): " << std::to_string((int)contenttype.size())
+        << std::endl;
     #endif
+
+    if(backend==nullptr && isAlive()
+            /* contenttype.empty() -> empty if never try download due to timeout*/
+            )
+    {
+        #ifdef DEBUGFASTCGI
+        if(!clientsList.empty())
+            std::cerr << "disconnectBackend " << this << " uri: " << uri << ": " << __FILE__ << ":" << __LINE__
+                << " WARNING clientsList size: " << std::to_string((int)clientsList.size())
+                << " mostly in case of timeout before start to download"
+                << std::endl;
+        #endif
+        if(!fromDestructor)
+        {
+            #ifdef DEBUGFASTCGI
+            if(Http::toDebug.find(this)==Http::toDebug.cend())
+            {
+                std::cerr << this << " Http::toDelete.insert() failed because not into debug" << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+            else
+                std::cerr << this << " Http::toDelete.insert() ok" << " " << __FILE__ << ":" << __LINE__ << std::endl;
+            #endif
+            Http::toDelete.insert(this);
+            #ifdef DEBUGFASTCGI
+            for(const Client * client : Client::clients)
+            {
+                if(client->http==this)
+                {
+                    std::cerr << "Http::~Http(): destructor, remain client on this http " << __FILE__ << ":" << __LINE__ << std::endl;
+                    abort();
+                }
+            }
+            for( const auto &n : Backend::addressToHttp )
+            {
+                for( const auto &m : n.second->busy )
+                {
+                    if(m->http==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+                for( const auto &m : n.second->idle )
+                {
+                    if(m->http==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+                for( const auto &m : n.second->pending )
+                {
+                    if(m==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+            }
+            for( const auto &n : Backend::addressToHttps )
+            {
+                for( const auto &m : n.second->busy )
+                {
+                    if(m->http==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+                for( const auto &m : n.second->idle )
+                {
+                    if(m->http==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+                for( const auto &m : n.second->pending )
+                {
+                    if(m==this)
+                    {
+                        std::cerr << (void *)m << " p->http==" << this << " into busy list, error http (abort)" << std::endl;
+                        abort();
+                    }
+                }
+            }
+            #endif
+        }
+    }
+    if(!cachePath.empty())
+    {
+        #ifdef DEBUGFASTCGI
+        std::string pathToHttpVar="pathToHttp";
+        if(&pathToHttpList()!=&Http::pathToHttp)
+            pathToHttpVar="pathToHttps";
+        #endif
+        std::unordered_map<std::string,Http *> &pathToHttp=pathToHttpList();
+        if(pathToHttp.find(cachePath)!=pathToHttp.cend())
+        {
+            #ifdef DEBUGFASTCGI
+            if(pathToHttp.at(cachePath)!=this)
+            {
+                std::cerr << "Http::disconnectBackend(), but " << pathToHttpVar << ".find(" << cachePath << ") not found (abort) " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+            #endif
+            std::cerr << "Http::disconnectBackend(), erase " << pathToHttpVar << ".find(" << cachePath << ") " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+            pathToHttp.erase(cachePath);
+        }
+        #ifdef DEBUGFASTCGI
+        else
+            std::cerr << this << " disconnectFrontend cachePath not found: " << cachePath << " " << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
+        std::string cachePathTmp=cachePath+".tmp";
+        if(pathToHttp.find(cachePathTmp)!=pathToHttp.cend())
+        {
+            #ifdef DEBUGFASTCGI
+            if(pathToHttp.at(cachePathTmp)!=this)
+            {
+                std::cerr << "Http::disconnectBackend(), but " << pathToHttpVar << ".find(" << cachePathTmp << ") not found (abort) " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+                abort();
+            }
+            #endif
+            std::cerr << "Http::disconnectBackend(), erase " << pathToHttpVar << ".find(" << cachePathTmp << ") " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
+            pathToHttp.erase(cachePathTmp);
+        }
+        #ifdef DEBUGFASTCGI
+        else
+            std::cerr << this << " disconnectFrontend cachePath not found: " << cachePathTmp << " " << __FILE__ << ":" << __LINE__ << std::endl;
+        #endif
+    }
+    #ifdef DEBUGFASTCGI
+    else
+        std::cerr << this << " disconnectFrontend cachePath not found: " << cachePath << " " << __FILE__ << ":" << __LINE__ << std::endl;
+    #endif
+    #ifdef DEBUGFASTCGI
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Http::pathToHttp;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Http::pathToHttp at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                abort();
+            }
+    }
+    {
+        std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Https::pathToHttps;
+        for( const auto &n : pathToHttp )
+            if(n.second==this)
+            {
+                std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Https::pathToHttps at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                abort();
+            }
+    }
+    #endif
+
     cachePath.clear();
     host.clear();
     uri.clear();
+    etagBackend.clear();
+    lastReceivedBytesTimestamps=0;
+    requestSended=false;
+    endDetected=false;
 }
 
 void Http::addClient(Client * client)
@@ -2395,12 +1610,35 @@ void Http::addClient(Client * client)
     #ifdef DEBUGFASTCGI
     std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " add client: " << client << " client fd: " << client->getFD() << std::endl;
     if(cachePath.empty())
-        std::cerr << "cachePath.empty()" << std::endl;
+        std::cerr << "addClient() cachePath.empty()" << std::endl;
     else
     {
-        std::unordered_map<std::string,Http *> &pathToHttp=pendingList();
+        std::unordered_map<std::string,Http *> &pathToHttp=pathToHttpList();
         if(pathToHttp.find(cachePath)==pathToHttp.cend())
             std::cerr << "Http::pathToHttp.find(" << cachePath << ")==Http::pathToHttp.cend()" << std::endl;
+    }
+    #endif
+    #ifdef DEBUGFASTCGI
+    if(cachePath.empty())
+    {
+        {
+            std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Http::pathToHttp;
+            for( const auto &n : pathToHttp )
+                if(n.second==this)
+                {
+                    std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Http::pathToHttp at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                    abort();
+                }
+        }
+        {
+            std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Https::pathToHttps;
+            for( const auto &n : pathToHttp )
+                if(n.second==this)
+                {
+                    std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Https::pathToHttps at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                    abort();
+                }
+        }
     }
     #endif
     if(host.empty() || uri.empty())
@@ -2433,7 +1671,7 @@ void Http::addClient(Client * client)
     if(tempCache)
         client->startRead(cachePath+".tmp",true);
     #ifdef DEBUGFASTCGI
-    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " backend " << backend << std::endl;
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " backend " << backend << " cachePath: " << cachePath << std::endl;
     #endif
     // can be without backend asigned due to max backend
 }
@@ -2441,7 +1679,33 @@ void Http::addClient(Client * client)
 bool Http::removeClient(Client * client)
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client: " << client << std::endl;
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client: " << client << " cachePath: " << cachePath << std::endl;
+    #endif
+    #ifdef DEBUGFASTCGI
+    if(cachePath.empty())
+    {
+        {
+            std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Http::pathToHttp;
+            for( const auto &n : pathToHttp )
+                if(n.second==this)
+                {
+                    std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Http::pathToHttp at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                    abort();
+                }
+        }
+        {
+            std::unordered_map<std::string/* example: cache/29E7336BDEA3327B */,Http *> pathToHttp=Https::pathToHttps;
+            for( const auto &n : pathToHttp )
+                if(n.second==this)
+                {
+                    std::cerr << "Http::~Http(): destructor post opt this " << this << " can't be into Https::pathToHttps at " << n.first << " " << __FILE__ << ":" << __LINE__ << " cachePath: " << cachePath << std::endl;
+                    abort();
+                }
+        }
+    }
+    #endif
+    #ifdef DEBUGFASTCGI
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client: " << client << " cachePath: " << cachePath << std::endl;
     #endif
     //some drop performance at exchange of bug prevent
     size_t i=0;
@@ -2457,10 +1721,13 @@ bool Http::removeClient(Client * client)
         else
             i++;
     }
+    #ifdef DEBUGFASTCGI
+    std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client: " << client << " cachePath: " << cachePath << std::endl;
+    #endif
     //return false;
     #ifdef DEBUGFASTCGI
     if(itemDropped!=1)
-        std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client failed: " << client << ", itemDropped: " << itemDropped << std::endl;
+        std::cerr << this << " " << __FILE__ << ":" << __LINE__ << " remove client failed: " << client << ", itemDropped: " << itemDropped << " cachePath: " << cachePath << std::endl;
     #endif
     return itemDropped==1;
 
@@ -2486,35 +1753,10 @@ int Http::write(const char * const data,const size_t &size)
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
         #endif
-        #ifdef MAXFILESIZE
-        struct stat sb;
-        int rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) 1" << std::endl;
-            abort();
-        }
-        #endif
         const size_t &writedSize=tempCache->write((char *)data,size);
-        #ifdef MAXFILESIZE
-        rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) 2" << std::endl;
-            abort();
-        }
-        #endif
         (void)writedSize;
         for(Client * client : clientsList)
             client->tryResumeReadAfterEndOfFile();
-        #ifdef MAXFILESIZE
-        rstat=stat((cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (cachePath+".tmp") << " is too big (abort) 3" << std::endl;
-            abort();
-        }
-        #endif
         contentwritten+=size;
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
@@ -2525,33 +1767,8 @@ int Http::write(const char * const data,const size_t &size)
             #ifdef DEBUGFASTCGI
             std::cerr << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
             #endif
-            #ifdef MAXFILESIZE
-            struct stat sb;
-            rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-            #endif
             disconnectFrontend();
-            #ifdef MAXFILESIZE
-            rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) 5" << std::endl;
-                abort();
-            }
-            #endif
             disconnectBackend();
-            #ifdef MAXFILESIZE
-            rstat=stat((cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (cachePath+".tmp") << " is too big (abort) 6" << std::endl;
-                abort();
-            }
-            #endif
             endDetected=true;
             return size;
         }
@@ -2741,21 +1958,58 @@ std::string Http::timestampsToHttpDate(const int64_t &time)
     struct tm *my_tm = gmtime(&time);
     if(strftime(buffer, sizeof(buffer), "%a, %d %b %Y %H:%M:%S GMT", my_tm)==0)
         return std::string("Thu, 1 Jan 1970 0:0:0 GMT");
-    #ifdef MAXFILESIZE
-    if(strnlen(buffer,sizeof(buffer))>4096)
-    {
-        std::cerr << "Header ETag creation too big (" << strnlen(buffer,sizeof(buffer)) << "), abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-        abort();
-    }
-    #endif
     return buffer;
 }
+
+#ifdef DEBUGFASTCGI
+void Http::checkBackend()
+{
+    if(backendList!=nullptr)
+    {
+        if(!backendList->idle.empty())
+        {
+            std::cerr << this << " backend==nullptr and !list->idle.empty(), isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+        if(backendList->busy.size()<Backend::maxBackend)
+        {
+            std::cerr << this << " backend==nullptr and list->busy.size()<Backend::maxBackend, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+        unsigned int index=0;
+        while(index<backendList->pending.size())
+        {
+            if(backendList->pending.at(index)==this)
+                break;
+            index++;
+        }
+        if(index>=backendList->pending.size())
+        {
+            std::cerr << this << " backend==nullptr and this " << this << " not found into pending, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
+            abort();
+        }
+    }
+    else
+    {
+        std::string host="Unknown IPv6";
+        char str[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &m_socket.sin6_addr, str, INET6_ADDRSTRLEN) != NULL)
+            host=str;
+        std::cerr << this << " http backend==nullptr and no backend list found, isAlive(): " << std::to_string((int)isAlive()) << ", clientsList size: " << std::to_string(clientsList.size()) << " " << host << " (abort)" << std::endl;
+        abort();
+    }
+}
+#endif
 
 //return true if timeout
 bool Http::detectTimeout()
 {
     const uint64_t msFrom1970=Backend::currentTime();
-    if(lastReceivedBytesTimestamps>(msFrom1970-10*1000))
+    unsigned int secondForTimeout=5;
+    if(pending)
+        secondForTimeout=30;
+
+    if(lastReceivedBytesTimestamps>(msFrom1970-secondForTimeout*1000))
     {
         //prevent time drift
         if(lastReceivedBytesTimestamps>msFrom1970)
@@ -2763,20 +2017,39 @@ bool Http::detectTimeout()
             std::cerr << "Http::detectTimeout(), time drift" << std::endl;
             lastReceivedBytesTimestamps=msFrom1970;
         }
+
+        #ifdef DEBUGFASTCGI
+        //check here if not backend AND free backend or backend count < max
+        if(backend==nullptr && (isAlive() || !clientsList.empty()))
+        {
+            //if have already connected backend on this ip
+            checkBackend();
+        }
+        #endif
         return false;
     }
+    if(backend!=nullptr)
+        std::cerr << "Http::detectTimeout() need to quit " << this << " and quit backend " << (void *)backend << __FILE__ << ":" << __LINE__ << std::endl;
+    else
+        std::cerr << "Http::detectTimeout() need to quit " << this << " " << __FILE__ << ":" << __LINE__ << std::endl;
     //if no byte received into 600s (10m)
     parseNonHttpError(Backend::NonHttpError_Timeout);
+    /*do into disconnectFrontend():
     for(Client * client : clientsList)
     {
         client->writeEnd();
         client->disconnect();
     }
-    clientsList.clear();
+    clientsList.clear();*/
+    disconnectFrontend();
     if(backend!=nullptr)
     {
+        //disconnectBackend();-> can't just connect the backend because the remaining data neeed to be consumed
+        backend->close();//keep the backend running, clean close
+    }
+    else // was in pending list
+    {
         disconnectBackend();
-        //backend->close();//keep the backend running, another protection fix this
     }
     return true;
 }
@@ -2784,17 +2057,31 @@ bool Http::detectTimeout()
 std::string Http::getQuery() const
 {
     std::string ret;
+    char buffer[32];
+    std::snprintf(buffer,sizeof(buffer),"%p",(void *)this);
+    ret+=std::string(buffer);
     if(!isAlive())
-        ret+="not alive";
+        ret+=" not alive";
     else
-        ret+="alive on "+getUrl();
+        ret+=" alive on "+getUrl();
+    if(backend!=nullptr)
+    {
+        std::snprintf(buffer,sizeof(buffer),"%p",(void *)backend);
+        ret+=" on backend "+std::string(buffer);
+    }
     if(!clientsList.empty())
         ret+=" with "+std::to_string(clientsList.size())+" client(s)";
-    ret+=" last byte "+std::to_string(lastReceivedBytesTimestamps)+", etagBackend: "+etagBackend;
+    ret+=" last byte "+std::to_string(lastReceivedBytesTimestamps);
+    if(!etagBackend.empty())
+        ret+=", etagBackend: "+etagBackend;
     if(requestSended)
         ret+=", requestSended";
     else
         ret+=", !requestSended";
+    if(tempCache!=nullptr)
+        ret+=", tempCache: "+cachePath;
+    if(finalCache!=nullptr)
+        ret+=", finalCache: "+cachePath;
     if(endDetected)
         ret+=", endDetected";
     else

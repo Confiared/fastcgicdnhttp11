@@ -8,6 +8,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <iostream>
+#ifdef DEBUGFASTCGI
+#include <unordered_set>
+#endif
 
 class Http;
 
@@ -33,15 +36,15 @@ public:
     void closeSSL();
     virtual ~Backend();
     void remoteSocketClosed();
-    static Backend * tryConnectInternalList(const sockaddr_in6 &s, Http *http, std::unordered_map<std::string, BackendList *> &addressToList, bool &connectInternal);
-    static Backend * tryConnectHttp(const sockaddr_in6 &s,Http *http, bool &connectInternal);
-    static Backend * tryConnectHttps(const sockaddr_in6 &s,Http *http, bool &connectInternal);
+    static Backend * tryConnectInternalList(const sockaddr_in6 &s, Http *http, std::unordered_map<std::string, BackendList *> &addressToList, bool &connectInternal, BackendList **backendList);
+    static Backend * tryConnectHttp(const sockaddr_in6 &s,Http *http, bool &connectInternal,Backend::BackendList ** backendList);
+    static Backend * tryConnectHttps(const sockaddr_in6 &s,Http *http, bool &connectInternal,Backend::BackendList ** backendList);
     void startHttps();
     void downloadFinished();
     void parseEvent(const epoll_event &event) override;
     bool tryConnectInternal(const sockaddr_in6 &s);
-    static std::unordered_map<std::string,BackendList *> addressToHttp;
-    static std::unordered_map<std::string,BackendList *> addressToHttps;
+    static std::unordered_map<std::string/*128Bits/16Bytes IPv6 encoded*/,BackendList *> addressToHttp;
+    static std::unordered_map<std::string/*128Bits/16Bytes IPv6 encoded*/,BackendList *> addressToHttps;
     static uint64_t currentTime();//ms from 1970
     bool detectTimeout();
     std::string getQuery() const;
@@ -52,24 +55,25 @@ public:
     #ifdef DEBUGHTTPS
     static void dump_cert_info(SSL *ssl, bool server);
     #endif
+    #ifdef DEBUGFASTCGI
+    static std::unordered_set<Backend *> toDebug;
+    #endif
 public:
     static uint16_t https_portBE;
     Http *http;
     bool https;
     bool wasTCPConnected;
+    const static SSL_METHOD *meth;
 private:
     uint64_t lastReceivedBytesTimestamps;
     std::string bufferSocket;
-    BackendList * backendList;
 
-    const SSL_METHOD *meth;
+public:
+    BackendList * backendList;//public to debug
+private:
+
     SSL_CTX* ctx;
     SSL* ssl;
-
-    #ifdef MAXFILESIZE
-    int fileGetCount;
-    int byteReceived;
-    #endif
 };
 
 #endif // BACKEND_H

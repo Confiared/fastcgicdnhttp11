@@ -8,6 +8,8 @@
 
 class Cache;
 
+#define CACHETIMEDIVIDER 1
+
 class Cache : public EpollObject
 {
 public:
@@ -49,9 +51,7 @@ public://configured by argument, see main.cpp
     static bool enable;
     static uint32_t http200Time;
 
-    #ifdef MAXFILESIZE
-    size_t readSizeFromCache;
-    #endif
+    static int cacheTimeDivider;
 private:
     static std::unordered_map<int,FDSave> FDList;
 };

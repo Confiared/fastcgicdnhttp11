@@ -1,5 +1,6 @@
 #include "Dns.hpp"
 #include "Client.hpp"
+#include "Cache.hpp"
 #include <unistd.h>
 #include <iostream>
 #include <string.h>
@@ -215,6 +216,9 @@ void Dns::parseEvent(const epoll_event &event)
                     return;
             }
             clientInProgress--;
+            #ifdef DEBUGFASTCGI
+            std::cerr << __FILE__ << ":" << __LINE__ << " dns reply" << std::endl;
+            #endif
 
             int pos=0;
             uint16_t transactionId=0;
@@ -254,6 +258,9 @@ void Dns::parseEvent(const epoll_event &event)
             if(queryList.find(transactionId)!=queryList.cend())
             {
                 const Query &q=queryList.at(transactionId);
+                #ifdef DEBUGFASTCGI
+                std::cerr << __FILE__ << ":" << __LINE__ << " dns reply for " << q.host << std::endl;
+                #endif
                 const std::vector<Client *> &http=q.http;
                 const std::vector<Client *> &https=q.https;
                 //std::string hostcpp(std::string hostcpp(q.host));-> not needed
@@ -411,7 +418,7 @@ void Dns::parseEvent(const epoll_event &event)
                                 default:
                                 {
                                     #ifdef DEBUGFASTCGI
-                                    std::cerr << __FILE__ << ":" << __LINE__ << " skip query: " << transactionId << " type " << type << std::endl;
+                                    std::cerr << __FILE__ << ":" << __LINE__ << " skip query: " << transactionId << " type " << type << " for " << q.host << std::endl;
                                     #endif
                                     canAddToPos(2+4,size,pos);
                                     uint16_t datasize=0;
@@ -503,13 +510,18 @@ void Dns::addCacheEntry(const StatusEntry &s,const uint32_t &ttl,const std::stri
         if(ttl<5*60)
         {
             if(s==StatusEntry_Right)
-                entry.outdated_date=time(NULL)+5*60;
+                entry.outdated_date=time(NULL)+5*60/CACHETIMEDIVIDER;
             else
-                entry.outdated_date=time(NULL)+3600;
+                entry.outdated_date=time(NULL)+3600/CACHETIMEDIVIDER;
         }
+        else
+            entry.outdated_date=time(NULL)+ttl/CACHETIMEDIVIDER;
     }
     else
-        entry.outdated_date=time(NULL)+24*3600;
+        entry.outdated_date=time(NULL)+24*3600/CACHETIMEDIVIDER;
+    #ifdef DEBUGFASTCGI
+    std::cerr << __FILE__ << ":" << __LINE__ << " insert into cache " << host << " " << (int64_t)entry.outdated_date << std::endl;
+    #endif
     entry.status=s;
 
     #ifdef DEBUGFASTCGI
@@ -584,7 +596,7 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
         abort();
     }
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << std::endl;
+    std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << " " << (int64_t)time(NULL) << std::endl;
     if(host=="www.bolivia-online.com" || host=="bolivia-online.com")
     {
         std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
@@ -600,9 +612,25 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
         if(queryList.find(queryId)!=queryList.cend())
         {
             if(https)
+            {
                 queryList[queryId].https.push_back(client);
+                #ifdef DEBUGFASTCGI
+                {
+                    const Query &q=queryList[queryId];
+                    std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << " add " << client << " to query " << queryId << " (" << q.nextRetry << ") for https" << std::endl;
+                }
+                #endif
+            }
             else
+            {
                 queryList[queryId].http.push_back(client);
+                #ifdef DEBUGFASTCGI
+                {
+                    const Query &q=queryList[queryId];
+                    std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << " add " << client << " to query " << queryId << " (" << q.nextRetry << ") for http" << std::endl;
+                }
+                #endif
+            }
             return true;
         }
         else //bug, try fix
@@ -657,6 +685,10 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
             }
             return true;
         }
+        #ifdef DEBUGFASTCGI
+        else
+            std::cerr << __FILE__ << ":" << __LINE__ << " try resolv " << host << " entry.outdated_date<=t: " << entry.outdated_date << ">" << (int64_t)time(NULL) << std::endl;
+        #endif
     }
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << std::endl;
@@ -724,13 +756,13 @@ bool Dns::get(Client * client, const std::string &host, const bool &https)
     {
         const int result = sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
         if(result!=sizeof(targetDnsIPv6))
-            std::cerr << "sendto Mode_IPv6" << std::endl;
+            std::cerr << "sendto Mode_IPv6 failed" << std::endl;
     }
     else //if(mode==Mode_IPv4)
     {
         const int result = sendto(fd,&buffer,pos,0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
         if(result!=sizeof(targetDnsIPv4))
-            std::cerr << "sendto Mode_IPv4" << std::endl;
+            std::cerr << "sendto Mode_IPv4 failed" << std::endl;
     }
 
     Query queryToPush;
@@ -851,14 +883,15 @@ void Dns::checkQueries()
                 {
                     const int result = sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv6,sizeof(targetDnsIPv6));
                     if(result!=sizeof(targetDnsIPv6))
-                        std::cerr << "sendto Mode_IPv6 reemit" << std::endl;
+                        std::cerr << "sendto Mode_IPv6 reemit failed" << std::endl;
                 }
                 else //if(mode==Mode_IPv4)
                 {
                     const int result = sendto(fd,query.query.data(),query.query.size(),0,(struct sockaddr*)&targetDnsIPv4,sizeof(targetDnsIPv4));
                     if(result!=sizeof(targetDnsIPv4))
-                        std::cerr << "sendto Mode_IPv4 reemit" << std::endl;
+                        std::cerr << "sendto Mode_IPv4 reemit failed" << std::endl;
                 }
+                std::cerr << "sendto reemit" << std::endl;
                 query.retryTime++;
                 query.nextRetry=time(NULL)+5;
                 this->queryByNextDueTime[query.nextRetry].push_back(id);

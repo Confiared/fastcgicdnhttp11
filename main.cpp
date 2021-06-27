@@ -131,19 +131,59 @@ int main(int argc, char *argv[])
     ServerTCP sTcp("127.0.0.1","5556");
     #endif
     (void)s;
-    std::vector<Client *> newDeleteClient,oldDeleteClient;
+    std::unordered_set<Client *> newDeleteClient,oldDeleteClient;
     std::vector<Backend *> newDeleteBackend,oldDeleteBackend;
+    std::unordered_set<Http *> newDeleteHttp,oldDeleteHttp;
     for (;;) {
         if ((nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1)) == -1)
             printf("epoll_wait error %s", strerror(errno));
         for(Client * client : oldDeleteClient)
-            delete client;
+        {
+            std::cerr << "Try delete Client " << (void *)client << std::endl;
+            #ifdef DEBUGFASTCGI
+            if(Client::toDebug.find(client)==Client::toDebug.cend())
+            {
+                std::cerr << "delete Client failed, not found into debug " << (void *)client << " (abort)" << std::endl;
+                //abort();
+            }
+            else
+            #endif
+            if(Client::clients.find(client)==Client::clients.cend())
+            {
+                std::cerr << "delete Client failed, not found into debug " << (void *)client << " (abort)" << std::endl;
+                //abort();
+            }
+            else
+                delete client;
+        }
         for(Backend * b : oldDeleteBackend)
+        {
+            #ifdef DEBUGFASTCGI
+            /*if(Backend::toDebug.find(b)==Backend::toDebug.cend())
+            {
+                std::cerr << "delete Backend failed, not found into debug " << (void *)b << " (abort)" << std::endl;
+                abort();
+            }*/
+            #endif
             delete b;
+        }
+        for(Http * r : oldDeleteHttp)
+        {
+            #ifdef DEBUGFASTCGI
+            if(Http::toDebug.find(r)==Http::toDebug.cend())
+            {
+                std::cerr << "delete Http failed, not found into debug " << (void *)r << " (abort)" << std::endl;
+                abort();
+            }
+            #endif
+            delete r;
+        }
         oldDeleteClient=newDeleteClient;
         newDeleteClient.clear();
         oldDeleteBackend=newDeleteBackend;
         newDeleteBackend.clear();
+        oldDeleteHttp=newDeleteHttp;
+        newDeleteHttp.clear();
         for (int n = 0; n < nfds; ++n)
         {
             epoll_event &e=events[n];
@@ -157,12 +197,13 @@ int main(int argc, char *argv[])
                 break;
                 case EpollObject::Kind::Kind_Client:
                 {
+                    std::cerr << "Event on Client " << e.data.ptr << std::endl;
                     Client * client=static_cast<Client *>(e.data.ptr);
                     client->parseEvent(e);
                     if(!client->isValid())
                     {
                         //if(!deleteClient.empty() && deleteClient.back()!=client)
-                        newDeleteClient.push_back(client);
+                        newDeleteClient.insert(client);
                         client->disconnect();
                     }
                 }
@@ -201,6 +242,10 @@ int main(int argc, char *argv[])
                 break;
             }
         }
+        newDeleteClient.insert(Client::toDelete.begin(),Client::toDelete.end());
+        Client::toDelete.clear();
+        newDeleteHttp.insert(Http::toDelete.begin(),Http::toDelete.end());
+        Http::toDelete.clear();
     }
 
     return 0;

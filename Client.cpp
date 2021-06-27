@@ -20,6 +20,8 @@
 #endif
 
 std::unordered_set<Client *> Client::clients;
+std::unordered_set<Client *> Client::toDelete;
+std::unordered_set<Client *> Client::toDebug;
 
 Client::Client(int cfd) :
     EpollObject(cfd,EpollObject::Kind::Kind_Client),
@@ -35,22 +37,32 @@ Client::Client(int cfd) :
     outputWrited(false),
     creationTime(0)
 {
+    std::cerr << "create client " << this << std::endl;
     Cache::newFD(cfd,this,EpollObject::Kind::Kind_Client);
     this->kind=EpollObject::Kind::Kind_Client;
     this->fd=cfd;
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " Client::Client() " << this << " fd: " << fd << " this->fd: " << this->fd << " constructor" << std::endl;
     #endif
-    #ifdef MAXFILESIZE
-    readSizeFromCache=0;
-    #endif
     clients.insert(this);
     creationTime=Backend::currentTime();
+    #ifdef DEBUGFASTCGI
+    toDebug.insert(this);
+    #endif
 }
 
 Client::~Client()
 {
-    clients.erase(this);
+    #ifdef DEBUGFASTCGI
+    toDebug.insert(this);
+    #endif
+    if(clients.find(this)!=clients.cend())
+        clients.erase(this);
+    else
+    {
+        std::cerr << "Client Entry not found into global list, abort()" << std::endl;
+        abort();
+    }
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " destructor " << this << std::endl;
     #endif
@@ -90,6 +102,8 @@ void Client::parseEvent(const epoll_event &event)
         disconnect();
     if(event.events & EPOLLRDHUP)
         disconnect();
+    if(event.events & EPOLLERR)
+        disconnect();
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " " << "event.events: " << event.events << " " << this << std::endl;
     #endif
@@ -97,19 +111,6 @@ void Client::parseEvent(const epoll_event &event)
 
 void Client::disconnect()
 {
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        sb.st_size=0;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef DEBUGFASTCGI
     {
         struct stat sb;
@@ -125,18 +126,6 @@ void Client::disconnect()
     #endif
     if(fd!=-1)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         #ifdef DEBUGFASTCGI
         std::cerr << this << " " << fd << " disconnect() close()" << std::endl;
         #endif
@@ -148,32 +137,8 @@ void Client::disconnect()
     }
     disconnectFromHttp();
     dataToWrite.clear();
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(status==Status_WaitDns)
         Dns::dns->cancelClient(this,host,https);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     fastcgiid=-1;
 }
 
@@ -181,36 +146,12 @@ void Client::disconnectFromHttp()
 {
     if(http!=nullptr)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         if(!http->removeClient(this))
         {
             #ifdef DEBUGFASTCGI
             std::cerr << this << " not into client list of " << http << " " << __FILE__ << ":" << __LINE__ << std::endl;
             #endif
         }
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         http=nullptr;
     }
 }
@@ -575,6 +516,8 @@ void Client::readyToRead()
                 return;
             }
         }
+        if(posdebug==markdebug)
+            https=true;
     }
     Client::loadUrl(host,uri,ifNoneMatch);
 }
@@ -601,6 +544,9 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         return;
     }
     else if(host=="debug.m3MM7UcOEr3qP3ZK") {
+        #ifdef DEBUGFASTCGI
+        std::cerr << __FILE__ << ":" << __LINE__ << " debug.m3MM7UcOEr3qP3ZK: " << this->fd << " " << this << std::endl;
+        #endif
         std::string reply("X-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\n");
         reply+="Current time: ";
         reply+=std::to_string(Backend::currentTime());
@@ -608,10 +554,25 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
         reply+="Dns: ";
         reply+=Dns::dns->getQueryList();
         reply+="\r\n";
+        size_t isNotValideCount=0;
+        for( const auto &n : Client::clients )
+            if(!n->isValid())
+                isNotValideCount++;
         reply+="Clients: ";
-        reply+=Client::clients.size();
+        reply+=std::to_string(Client::clients.size());
+        if(isNotValideCount>0)
+            reply+=", "+std::to_string(isNotValideCount)+" not valid";
         reply+="\r\n";
+        #ifdef DEBUGFASTCGI
+        reply+="Backend: "+std::to_string(Backend::toDebug.size())+"\r\n";
+        #endif
         reply+="Http: ";
+        #ifdef DEBUGFASTCGI
+        reply+="(http "+std::to_string(Http::toDebug.size()-Https::toDebug.size())+" and https "+std::to_string(Https::toDebug.size())+" backend)";
+        std::unordered_set<const Http *> notIntoTheList;
+        notIntoTheList.insert(Http::toDebug.begin(),Http::toDebug.end());
+        #endif
+        reply+="\r\n";
         {
             std::string ret;
             for( const auto &n : Http::pathToHttp )
@@ -619,66 +580,102 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                 const Http * const client=n.second;
                 if(client!=nullptr)
                     ret+="http "+client->getQuery()+"\r\n";
+                #ifdef DEBUGFASTCGI
+                notIntoTheList.erase(client);
+                #endif
             }
             for( const auto &n : Https::pathToHttps )
             {
                 const Http * const client=n.second;
                 if(client!=nullptr)
                     ret+="https "+client->getQuery()+"\r\n";
+                #ifdef DEBUGFASTCGI
+                notIntoTheList.erase(client);
+                #endif
             }
             for( const auto &n : Backend::addressToHttp )
             {
-                const std::string &host=n.first;
-                ret+="backend http "+host+"\r\n";
+                in6_addr sin6_addr;
+                memcpy(&sin6_addr,n.first.data(),16);
+
+                std::string host="Unknown IPv6";
+                char str[INET6_ADDRSTRLEN];
+                if (inet_ntop(AF_INET6, n.first.data(), str, INET6_ADDRSTRLEN) != NULL)
+                    host=str;
+
+                ret+="backend http \""+host+"\"\r\n";
+                if(n.second!=nullptr)
                 {
-                    const std::vector<Backend *> &backend=n.second->busy;
-                    for( const auto &m : backend )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
+                    ret+="busy:\r\n";
+                    {
+                        const std::vector<Backend *> &backend=n.second->busy;
+                        for( const auto &m : backend )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
+                    ret+="idle:\r\n";
+                    {
+                        const std::vector<Backend *> &backend=n.second->idle;
+                        for( const auto &m : backend )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
+                    ret+="pending:\r\n";
+                    {
+                        const std::vector<Http *> &pending=n.second->pending;
+                        for( const auto &m : pending )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
                 }
-                ret+=";\r\n";
-                {
-                    const std::vector<Backend *> &backend=n.second->idle;
-                    for( const auto &m : backend )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
-                }
-                ret+=";\r\n";
-                {
-                    const std::vector<Http *> &pending=n.second->pending;
-                    for( const auto &m : pending )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
-                }
+                else
+                    ret+="no backend list\"\r\n";
             }
             for( const auto &n : Backend::addressToHttps )
             {
-                const std::string &host=n.first;
-                ret+="backend https "+host+"\r\n";
+                in6_addr sin6_addr;
+                memcpy(&sin6_addr,n.first.data(),16);
+
+                std::string host="Unknown IPv6";
+                char str[INET6_ADDRSTRLEN];
+                if (inet_ntop(AF_INET6, n.first.data(), str, INET6_ADDRSTRLEN) != NULL)
+                    host=str;
+
+                ret+="backend https \""+host+"\"\r\n";
+                if(n.second!=nullptr)
                 {
-                    const std::vector<Backend *> &backend=n.second->busy;
-                    for( const auto &m : backend )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
+                    ret+="busy:\r\n";
+                    {
+                        const std::vector<Backend *> &backend=n.second->busy;
+                        for( const auto &m : backend )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
+                    ret+="idle:\r\n";
+                    {
+                        const std::vector<Backend *> &backend=n.second->idle;
+                        for( const auto &m : backend )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
+                    ret+="pending:\r\n";
+                    {
+                        const std::vector<Http *> &pending=n.second->pending;
+                        for( const auto &m : pending )
+                            if(m!=nullptr)
+                                ret+=m->getQuery()+"\r\n";
+                    }
                 }
-                ret+=";\r\n";
-                {
-                    const std::vector<Backend *> &backend=n.second->idle;
-                    for( const auto &m : backend )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
-                }
-                ret+=";\r\n";
-                {
-                    const std::vector<Http *> &pending=n.second->pending;
-                    for( const auto &m : pending )
-                        if(m!=nullptr)
-                            ret+=m->getQuery()+"\r\n";
-                }
+                else
+                    ret+="no backend list\"\r\n";
             }
             reply+=ret;
         }
         reply+="\r\n";
+        #ifdef DEBUGFASTCGI
+        for (const Http * const x: notIntoTheList)
+            reply+="lost http(s) "+x->getQuery()+"\r\n";
+        #endif
         writeOutput(reply.data(),reply.size());
         writeEnd();
         disconnect();
@@ -753,9 +750,9 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                 std::cerr << this << " http " << path << " is not alive" << __FILE__ << ":" << __LINE__ << std::endl;
                 Http *http=Http::pathToHttp.at(path);
                 Http::pathToHttp.erase(path);
-                http->disconnectBackend();
                 http->disconnectFrontend();
-                delete http;
+                http->disconnectBackend();
+                //delete http;->do into http->disconnectBackend();
             }
             else
             {
@@ -787,9 +784,9 @@ void Client::loadUrl(std::string host,const std::string &uri,const std::string &
                 std::cerr << this << " http " << path << " is not alive" << __FILE__ << ":" << __LINE__ << std::endl;
                 Http *http=Https::pathToHttps.at(path);
                 Https::pathToHttps.erase(path);
-                http->disconnectBackend();
                 http->disconnectFrontend();
-                delete http;
+                http->disconnectBackend();
+                //delete http;->do into http->disconnectBackend();
             }
             else
             {
@@ -1182,9 +1179,9 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             {
                 Http *http=Http::pathToHttp.at(path);
                 Http::pathToHttp.erase(path);
-                http->disconnectBackend();
                 http->disconnectFrontend();
-                delete http;
+                http->disconnectBackend();
+                //delete http;->do into http->disconnectBackend();
             }
             else
             {
@@ -1215,9 +1212,9 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
             {
                 Http *http=Https::pathToHttps.at(path);
                 Https::pathToHttps.erase(path);
-                http->disconnectBackend();
                 http->disconnectFrontend();
-                delete http;
+                http->disconnectBackend();
+                //delete http;->do into http->disconnectBackend();
             }
             else
             {
@@ -1241,18 +1238,6 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
         const bool cacheWasExists=stat(path.c_str(),&sb)==0;
         if(cacheWasExists)
         {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
-        #endif
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            if (stat(path.c_str(), &sb) == 0)
-                std::cout << "delete before open " << path << " with size of " << sb.st_size << std::endl;
-            if(Http::duplicateOpen.find(path)!=Http::duplicateOpen.cend())
-            {
-                std::cerr << "duplicate open same file (abort)" << std::endl;
-                abort();
-            }
-        }
         #endif
         //try open cache
         //std::cerr << "open((path).c_str() " << path << std::endl;
@@ -1283,6 +1268,10 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                     std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " fd: " << getFD() << std::endl;
                     #endif
                 }
+                #ifdef DEBUGFASTCGI
+                else
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " fd: " << getFD() << " don't have backend! wait about one" << std::endl;
+                #endif
                 /*else
                 {
                     //don't have backend, just wait -> tryConnect() call Backend::tryConnectInternalList()
@@ -1296,7 +1285,16 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                     disconnect();
                 }*/
                 if(Https::pathToHttps.find(path)==Https::pathToHttps.cend())
+                {
+                    #ifdef DEBUGFASTCGI
+                    if(http->cachePath.empty())
+                    {
+                        std::cerr << "Client::dnsRight(), http->cachePath.empty() can't be empty if add to Http::pathToHttp " << path << " " << (void *)http << " " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
+                        abort();
+                    }
+                    #endif
                     Https::pathToHttps[path]=https;
+                }
                 else
                 {
                     std::cerr << "Https::pathToHttps.find(" << path << ") already found, abort()" << std::endl;
@@ -1327,19 +1325,33 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                     std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
                     #endif
                 }
+                #ifdef DEBUGFASTCGI
                 else
+                    std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " fd: " << getFD() << " don't have backend! wait about one" << std::endl;
+                #endif
+                /*else
                 {
-                    /*#ifdef DEBUGFASTCGI
+                    //don't have backend, just wait -> tryConnect() call Backend::tryConnectInternalList()
+                    #ifdef DEBUGFASTCGI
                     std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
                     #endif
                     status=Status_Idle;
                     char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nSocket Error (1b)";
                     writeOutput(text,sizeof(text)-1);
                     writeEnd();
-                    disconnect();*/
-                }
+                    disconnect();
+                }*/
                 if(Http::pathToHttp.find(path)==Http::pathToHttp.cend())
+                {
+                    #ifdef DEBUGFASTCGI
+                    if(http->cachePath.empty())
+                    {
+                        std::cerr << "Client::dnsRight(), http->cachePath.empty() can't be empty if add to Http::pathToHttp " << path << " " << (void *)http << " " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
+                        abort();
+                    }
+                    #endif
                     Http::pathToHttp[path]=http;
+                }
                 else
                 {
                     std::cerr << "Http::pathToHttp.find(" << path << ") already found, abort()" << std::endl;
@@ -1450,7 +1462,16 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                     disconnect();*/
                 }
                 if(Https::pathToHttps.find(path)==Https::pathToHttps.cend())
+                {
+                    #ifdef DEBUGFASTCGI
+                    if(http->cachePath.empty())
+                    {
+                        std::cerr << "Client::dnsRight(), http->cachePath.empty() can't be empty if add to Http::pathToHttp " << path << " " << (void *)http << " " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
+                        abort();
+                    }
+                    #endif
                     Https::pathToHttps[path]=https;
+                }
                 else
                 {
                     std::cerr << "Https::pathToHttps.find(" << path << ") already found, abort()" << std::endl;
@@ -1493,7 +1514,16 @@ void Client::dnsRight(const sockaddr_in6 &sIPv6)
                     disconnect();*/
                 }
                 if(Http::pathToHttp.find(path)==Http::pathToHttp.cend())
+                {
+                    #ifdef DEBUGFASTCGI
+                    if(http->cachePath.empty())
+                    {
+                        std::cerr << "Client::dnsRight(), http->cachePath.empty() can't be empty if add to Http::pathToHttp " << path << " " << (void *)http << " " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
+                        abort();
+                    }
+                    #endif
                     Http::pathToHttp[path]=http;
+                }
                 else
                 {
                     std::cerr << "Http::pathToHttp.find(" << path << ") already found, abort()" << std::endl;
@@ -1510,33 +1540,9 @@ bool Client::startRead()
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << " Client::startRead()" << std::endl;
     #endif
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(!readCache->seekToContentPos())
     {
         std::cerr << __FILE__ << ":" << __LINE__ << " Client::startRead(): !readCache->seekToContentPos(), cache corrupted?" << std::endl;
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         status=Status_Idle;
         char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nUnable to read cache (1)";
         writeOutput(text,sizeof(text)-1);
@@ -1544,67 +1550,13 @@ bool Client::startRead()
         disconnect();
         return false;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     readCache->setAsync();
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(!readCache->seekToContentPos())
     {
         std::cerr << __FILE__ << ":" << __LINE__ << " Client::startRead(): !readCache->seekToContentPos(), cache corrupted bis?" << std::endl;
         return false;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
-    #ifdef MAXFILESIZE
-    /*{
-        ssize_t filepos=lseek(fd, 0L, SEEK_CUR );
-        std::cerr << this << " filepos " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " filepos: " << filepos << ", errno: " << errno << std::endl;
-    }*/
-    #endif
     continueRead();
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
@@ -1612,18 +1564,6 @@ bool Client::startRead(const std::string &path, const bool &partial)
 {
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
-    #endif
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
     #endif
     this->partial=partial;
     //O_WRONLY -> failed, need Read too call Cache::seekToContentPos(), read used to get pos
@@ -1634,62 +1574,14 @@ bool Client::startRead(const std::string &path, const bool &partial)
     {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " " << path.c_str() << " cache size: " << sb.st_size << std::endl;}
     #endif
     int cachefd = open(path.c_str(), O_RDWR | O_NOCTTY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     //if failed open cache
     if(cachefd==-1)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         status=Status_Idle;
         char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nUnable to read cache (2)";
         writeOutput(text,sizeof(text)-1);
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         writeEnd();
         disconnect();
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
     else
@@ -1701,234 +1593,42 @@ bool Client::startRead(const std::string &path, const bool &partial)
         if(!cacheWasExists && cacheWasExists2)
         {std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " cache created into wrong way 2" << std::endl;}
         #endif
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         #ifdef DEBUGFILEOPEN
         std::cerr << "Client::startRead() open: " << path << ", fd: " << cachefd << std::endl;
         #endif
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     const off_t &s=lseek(cachefd,1*sizeof(uint64_t),SEEK_SET);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(s==-1)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " unable to seek" << std::endl;
         status=Status_Idle;
         char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nUnable to seek";
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         writeOutput(text,sizeof(text)-1);
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         writeEnd();
         disconnect();
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
     #ifdef DEBUGFASTCGI
     std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
     #endif
     const uint64_t &currentTime=time(NULL);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(readCache!=nullptr)
     {
         delete readCache;
         readCache=nullptr;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     readCache=new Cache(cachefd);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     readCache->set_access_time(currentTime);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(!readCache->seekToContentPos())
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         std::cerr << __FILE__ << ":" << __LINE__ << " " << this << " unable to seek to content" << std::endl;
         status=Status_Idle;
         char text[]="Status: 500 Internal Server Error\r\nX-Robots-Tag: noindex, nofollow\r\nContent-type: text/plain\r\n\r\nUnable to seek to content";
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         writeOutput(text,sizeof(text)-1);
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         writeEnd();
         disconnect();
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     return startRead();
 }
 
@@ -1951,240 +1651,45 @@ void Client::tryResumeReadAfterEndOfFile()
 void Client::continueRead()
 {
     #ifdef DEBUGFASTCGI
-    std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << " http " << http << std::endl;
-    #endif
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
+    if(http)
+        std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << " http " << http << " http->cachePath: " << http->cachePath << std::endl;
+    else
+        std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
     #endif
     if(readCache==nullptr)
         return;
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(!dataToWrite.empty())
         return;
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
-    #ifdef MAXFILESIZE
-    {
-        ssize_t filepos=lseek(fd, 0L, SEEK_CUR );
-        if(filepos>99000000)
-            std::cerr << this << " filepos " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " filepos: " << filepos << std::endl;
-    }
-    #else
-        #ifdef DEBUGFASTCGI
-        std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
-        #endif
+    #ifdef DEBUGFASTCGI
+    std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << " " << this << std::endl;
     #endif
     char buffer[65536-1000];
     do {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
-        #ifdef MAXFILESIZE
-        {
-            ssize_t filepos=lseek(fd, 0L, SEEK_CUR );
-            if(filepos>99000000)
-                std::cerr << this << " filepos " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " filepos: " << filepos << std::endl;
-        }
-        #endif
         const ssize_t &s=readCache->read(buffer,sizeof(buffer));
-        #ifdef MAXFILESIZE
-        if(s>0)
-            readSizeFromCache+=s;
-        if(readSizeFromCache>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big read size (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-        #endif
         if(s<1)
         {
             if(!partial)
             {
-                #ifdef MAXFILESIZE
-                if(http!=nullptr)
-                {
-                    struct stat sb;
-                    int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                        abort();
-                    }
-                }
-                #endif
+                std::cerr << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this << " writeEnd();disconnect();" << std::endl;
                 writeEnd();
                 disconnect();
-                #ifdef MAXFILESIZE
-                if(http!=nullptr)
-                {
-                    struct stat sb;
-                    int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                        abort();
-                    }
-                }
-                #endif
             }
             else
             {
-                #ifdef MAXFILESIZE
-                if(http!=nullptr)
-                {
-                    struct stat sb;
-                    int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 partialEndOfFileTrigged=true;
                 //std::cout << "End of file, wait more" << std::endl;
             }
-            #ifdef MAXFILESIZE
-            if(http!=nullptr)
-            {
-                struct stat sb;
-                int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                    abort();
-                }
-            }
-            #endif
             return;
         }
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         partialEndOfFileTrigged=false;
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
-        #ifdef MAXFILESIZE
-        {
-            ssize_t filepos=lseek(fd, 0L, SEEK_CUR );
-            if(filepos>99000000)
-                std::cerr << this << " filepos " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " filepos: " << filepos << std::endl;
-        }
-        #endif
         writeOutput(buffer,s);
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         //if can't write all
         if(!dataToWrite.empty())
         {
-            #ifdef MAXFILESIZE
-            if(http!=nullptr)
-            {
-                struct stat sb;
-                int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                    abort();
-                }
-            }
-            #endif
             return;
         }
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         //if can write all, try again
     } while(1);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
 }
 
 void Client::cacheError()
@@ -2207,17 +1712,6 @@ void Client::readyToWrite()
     if(!dataToWrite.empty())
     {
         const ssize_t writedSize=::write(fd,dataToWrite.data(),dataToWrite.size());
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         if(errno!=0 && errno!=EAGAIN)
         {
             #ifdef DEBUGFASTCGI
@@ -2275,123 +1769,27 @@ void Client::writeOutput(const char * const data,const int &size)
     uint16_t sizebe=htobe16(size);
     memcpy(header+1+1+2,&sizebe,2);
     memcpy(header+1+1+2+2,&paddingbe,2);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     write(header,1+1+2+2+2);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     write(data,size);
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
 
     if(padding>0)
     {
         char t[padding];
         write(t,padding);
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
 }
 
 void Client::write(const char * const data,const int &size)
 {
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(fd==-1)
         return;
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(data==nullptr)
         return;
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(!dataToWrite.empty())
     {
         dataToWrite+=std::string(data,size);
         return;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     /*{
         std::cerr << fd << " write) ";
         if(size>255)
@@ -2409,100 +1807,21 @@ void Client::write(const char * const data,const int &size)
     }*/
 
     errno=0;
-    #ifdef MAXFILESIZE
-    ssize_t filepos=lseek(fd, 0L, SEEK_CUR );
-    ssize_t filesize=-1;
-    {
-        struct stat sb;
-        int rstat=fstat(fd,&sb);
-        if(rstat==0)
-            filesize=sb.st_size>100000000;
-    }
-    #endif
     const int writedSize=::write(fd,data,size);
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << this << " too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " filepos: " << filepos << " filesize " << filesize << std::endl;
-            abort();
-        }
-    }
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
     if(writedSize==size)
         return;
     else if(errno!=0 && errno!=EAGAIN)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << " " << this << std::endl;
         #endif
         if(errno!=32)//if not BROKEN PIPE
             std::cerr << fd << ") error to write: " << errno << std::endl;
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         disconnect();
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         return;
     }
     if(errno==EAGAIN)
     {
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         dataToWrite+=std::string(data+writedSize,size-writedSize);
         return;
     }
@@ -2511,45 +1830,9 @@ void Client::write(const char * const data,const int &size)
         #ifdef DEBUGFASTCGI
         std::cerr << __FILE__ << ":" << __LINE__ << " errno " << errno << " this " << this << " size " << size << " writedSize " << writedSize << std::endl;
         #endif
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         disconnect();
-        #ifdef MAXFILESIZE
-        if(http!=nullptr)
-        {
-            struct stat sb;
-            int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-                abort();
-            }
-        }
-        #endif
         return;
     }
-    #ifdef MAXFILESIZE
-    if(http!=nullptr)
-    {
-        struct stat sb;
-        int rstat=stat((http->cachePath+".tmp").c_str(),&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << (http->cachePath+".tmp") << " is too big (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-            abort();
-        }
-    }
-    #endif
 }
 
 void Client::httpError(const std::string &errorString)
@@ -2639,6 +1922,16 @@ void Client::writeEnd()
 
 bool Client::detectTimeout()
 {
+    #ifdef DEBUGFASTCGI
+    if(http!=nullptr)
+    {
+        if(Http::toDebug.find(http)==Http::toDebug.cend())
+        {
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << "Client::detectTimeout(), Http::toDebug.find(http)==Http::toDebug.cend()" << std::endl;
+            abort();
+        }
+    }
+    #endif
     if(fullyParsed)
         return false;
     const uint64_t msFrom1970=Backend::currentTime();
@@ -2647,7 +1940,7 @@ bool Client::detectTimeout()
         //prevent time drift
         if(creationTime>msFrom1970)
         {
-            std::cerr << "Http::detectTimeout(), time drift" << std::endl;
+            std::cerr << __FILE__ << ":" << __LINE__ << " " << this << "Client::detectTimeout(), time drift" << std::endl;
             creationTime=msFrom1970;
         }
         return false;

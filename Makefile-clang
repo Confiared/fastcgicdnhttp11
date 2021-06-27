@@ -4,8 +4,8 @@ EQ            = =
 
 ####### Compiler, tools and options
 
-CC            = gcc
-CXX           = g++
+CC            = clang
+CXX           = clang++
 DEFINES       = -DDEBUGFASTCGI -DDEBUGDNS -DDEBUGFILEOPEN -DDEBUGFASTCGITCP
 CFLAGS        = -pipe -g $(DEFINES)
 CXXFLAGS      = -pipe -g -std=gnu++11 $(DEFINES)
@@ -26,11 +26,9 @@ MOVE          = mv -f
 TAR           = tar -cf
 COMPRESS      = gzip -9f
 DISTNAME      = fastcgicdnhttp11
-LINK          = g++
-LFLAGS        = -Wl,-fuse-ld=gold
-#LFLAGS        = -Wl,-fuse-ld=lld
-#LFLAGS        = 
-LIBS          = -lssl -lcrypto
+LINK          = 
+LFLAGS        = -Wl,-fuse-ld=lld
+LIBS          = $(SUBLIBS) -lssl -lcrypto
 AR            = ar cqs
 RANLIB        = 
 SED           = sed
@@ -110,7 +108,10 @@ first: all
 fastcgicdnhttp11:  $(OBJECTS)  
 	$(LINK) $(LFLAGS) -o $(TARGET) $(OBJECTS) $(OBJCOMP) $(LIBS)
 
-all: fastcgicdnhttp11
+Makefile: ./fastcgicdnhttp11.pro
+	$(QMAKE) -o Makefile ./fastcgicdnhttp11.pro -spec linux-g++ CONFIG+=debug CONFIG+=qml_debug
+
+all: Makefile fastcgicdnhttp11
 
 ####### Compile
 

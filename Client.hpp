@@ -50,10 +50,18 @@ public:
     };
 
     static std::unordered_set<Client *> clients;//for timeout
+    static std::unordered_set<Client *> toDelete;
+    #ifdef DEBUGFASTCGI
+    static std::unordered_set<Client *> toDebug;
+    #endif
 private:
     int fastcgiid;
     Cache *readCache;
+    #ifdef DEBUGFASTCGI
+public:
+    #endif
     Http *http;
+private:
     std::string dataToWrite;
     bool fullyParsed;
     bool endTriggered;
@@ -64,9 +72,6 @@ private:
     bool outputWrited;
     std::string uri;
     std::string host;
-    #ifdef MAXFILESIZE
-    size_t readSizeFromCache;
-    #endif
     uint64_t creationTime;
 };
 

@@ -41,9 +41,6 @@ Cache::Cache(const int &fd)
         //unset curl to all future listener
         //Close all listener
     */
-    #ifdef MAXFILESIZE
-    readSizeFromCache=0;
-    #endif
 }
 
 Cache::~Cache()
@@ -74,9 +71,6 @@ void Cache::parseEvent(const epoll_event &event)
 
 void Cache::close()
 {
-    #ifdef MAXFILESIZE
-    std::cout << "Cache::close(), close " << fd << std::endl;
-    #endif
     #ifdef DEBUGFILEOPEN
     std::cerr << "Cache::close(), fd: " << fd << std::endl;
     #endif
@@ -248,32 +242,10 @@ uint16_t Cache::http_code() const
 
 bool Cache::set_access_time(const uint64_t &time)
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef PREADPWRITE
     if(::pwrite(fd,&time,sizeof(time),0)!=sizeof(time))
     {
         std::cerr << "Unable to write last_modification_time_check" << std::endl;
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            const int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
     #else
@@ -291,48 +263,15 @@ bool Cache::set_access_time(const uint64_t &time)
         return false;
     }
     #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
 bool Cache::set_last_modification_time_check(const uint64_t &time)
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef PREADPWRITE
     if(::pwrite(fd,&time,sizeof(time),sizeof(uint64_t))!=sizeof(time))
     {
         std::cerr << "Unable to write last_modification_time_check" << std::endl;
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            const int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
     #else
@@ -350,52 +289,15 @@ bool Cache::set_last_modification_time_check(const uint64_t &time)
         return false;
     }
     #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
 bool Cache::set_ETagFrontend(const std::string &etag)
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
-    #ifdef MAXFILESIZE
-    if(etag.find('\0')!=std::string::npos)
-        std::cerr << "etag contain \\0 abort" << __FILE__ << ":" << __LINE__ << std::endl;
-    #endif
     #ifdef PREADPWRITE
     if((size_t)::pwrite(fd,etag.data(),etag.size(),2*sizeof(uint64_t)+sizeof(uint16_t))!=etag.size())
     {
         std::cerr << "Unable to write last_modification_time_check" << std::endl;
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            const int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
     #else
@@ -413,37 +315,11 @@ bool Cache::set_ETagFrontend(const std::string &etag)
         return false;
     }
     #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
 bool Cache::set_ETagBackend(const std::string &etag)//at end seek to content pos
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
-    #ifdef MAXFILESIZE
-    if(etag.find('\0')!=std::string::npos)
-        std::cerr << "etag contain \\0 abort" << __FILE__ << ":" << __LINE__ << std::endl;
-    #endif
     if(etag.size()>255)
     {
         char c=0x00;
@@ -451,17 +327,6 @@ bool Cache::set_ETagBackend(const std::string &etag)//at end seek to content pos
         if(::pwrite(fd,&c,sizeof(c),3*sizeof(uint64_t))!=sizeof(c))
         {
             std::cerr << "Unable to write last_modification_time_check" << std::endl;
-            #ifdef MAXFILESIZE
-            {
-                struct stat sb;
-                const int rstat=fstat(fd,&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                    abort();
-                }
-            }
-            #endif
             return false;
         }
         #else
@@ -487,17 +352,6 @@ bool Cache::set_ETagBackend(const std::string &etag)//at end seek to content pos
         if(::pwrite(fd,&c,sizeof(c),3*sizeof(uint64_t))!=sizeof(c))
         {
             std::cerr << "Unable to write last_modification_time_check" << std::endl;
-            #ifdef MAXFILESIZE
-            {
-                struct stat sb;
-                const int rstat=fstat(fd,&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                    abort();
-                }
-            }
-            #endif
             return false;
         }
 #else
@@ -518,17 +372,6 @@ bool Cache::set_ETagBackend(const std::string &etag)//at end seek to content pos
             if((size_t)::pwrite(fd,etag.data(),etag.size(),3*sizeof(uint64_t)+sizeof(uint8_t))!=etag.size())
             {
                 std::cerr << "Unable to write last_modification_time_check" << std::endl;
-                #ifdef MAXFILESIZE
-                {
-                    struct stat sb;
-                    const int rstat=fstat(fd,&sb);
-                    if(rstat==0 && sb.st_size>100000000)
-                    {
-                        std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                        abort();
-                    }
-                }
-                #endif
                 return false;
             }
 #else
@@ -540,48 +383,15 @@ bool Cache::set_ETagBackend(const std::string &etag)//at end seek to content pos
 #endif
         }
     }
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
 bool Cache::set_http_code(const uint16_t &http_code)
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     #ifdef PREADPWRITE
     if(::pwrite(fd,&http_code,sizeof(http_code),2*sizeof(uint64_t))!=sizeof(http_code))
     {
         std::cerr << "Unable to write last_modification_time_check" << std::endl;
-        #ifdef MAXFILESIZE
-        {
-            struct stat sb;
-            const int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         return false;
     }
 #else
@@ -596,17 +406,6 @@ bool Cache::set_http_code(const uint16_t &http_code)
         return false;
     }
 #endif
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return true;
 }
 
@@ -627,17 +426,6 @@ void Cache::setAsync()
 
 bool Cache::seekToContentPos()
 {
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     uint8_t etagBackendSize=0;
     errno=0;
     #ifdef PREADPWRITE
@@ -658,113 +446,29 @@ bool Cache::seekToContentPos()
     if(returnVal==sizeof(etagBackendSize))
     {
         const off_t &pos=3*sizeof(uint64_t)+sizeof(uint8_t)+etagBackendSize;
-        #ifdef MAXFILESIZE
-        {
-            if(pos>100000000 || pos<1)
-            {
-                std::cerr << "seekToContentPos pos wrong " << pos << " " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         const off_t &s=lseek(fd,pos,SEEK_SET);
         if(s==-1)
         {
-            #ifdef MAXFILESIZE
-            {
-                struct stat sb;
-                const int rstat=fstat(fd,&sb);
-                if(rstat==0 && sb.st_size>100000000)
-                {
-                    std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                    abort();
-                }
-            }
-            #endif
             std::cerr << "Unable to seek setContentPos" << std::endl;
             return false;
         }
         //std::cout << "seek to:" << pos << std::endl;
-        #ifdef MAXFILESIZE
-        {
-            if(pos>100000000)
-            {
-                std::cerr << "Cache try seek more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-
-            struct stat sb;
-            const int rstat=fstat(fd,&sb);
-            if(rstat==0 && sb.st_size>100000000)
-            {
-                std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-                abort();
-            }
-        }
-        #endif
         return true;
     }
     else
         std::cerr << "Unable to pread, errno: " << errno << " " << __FILE__ << ":" << __LINE__ << std::endl;
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return false;
 }
 
 ssize_t Cache::write(const char * const data,const size_t &size)
 {
-    #ifdef MAXFILESIZE
-    {
-        if(size>100000000)
-        {
-            std::cerr << "write size to big, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     ssize_t r=::write(fd,data,size);
-    #ifdef MAXFILESIZE
-    {
-        struct stat sb;
-        const int rstat=fstat(fd,&sb);
-        if(rstat==0 && sb.st_size>100000000)
-        {
-            std::cerr << "Cache if more than 100M size, abort to debug " << __FILE__ << ":" << __LINE__ << std::endl;
-            abort();
-        }
-    }
-    #endif
     return r;
 }
 
 ssize_t Cache::read(char * data,const size_t &size)
 {
     const ssize_t s=::read(fd,data,size);
-    #ifdef MAXFILESIZE
-    if(s>0)
-        readSizeFromCache+=s;
-    if(readSizeFromCache>100000000)
-    {
-        std::cerr << "is too big read size (abort) " << __FILE__ << ":" << __LINE__ << " fd: " << fd << " this->fd: " << this->fd << std::endl;
-        abort();
-    }
-    #endif
     return s;
 }
 
@@ -773,11 +477,11 @@ uint32_t Cache::timeToCache(uint16_t http_code)
     switch(http_code)
     {
         case 200:
-            return Cache::http200Time;
+            return Cache::http200Time/CACHETIMEDIVIDER;
             //return 600;
         break;
         default:
-            return 60;
+            return 60/CACHETIMEDIVIDER;
         break;
     }
 }
@@ -786,10 +490,10 @@ void Cache::newFD(const int &fd,void * pointer,const EpollObject::Kind &kind)
 {
     if(fd<0)
     {
-        std::cerr << "ERROR Cache::newFD(" << fd << "," << pointer << "," << kind << ")" << std::endl;
+        std::cerr << "ERROR Cache::newFD(" << fd << "," << pointer << "," << std::to_string((int)kind) << ")" << std::endl;
         return;
     }
-    std::cerr << "Cache::newFD(" << fd << "," << pointer << "," << kind << ")" << std::endl;
+    std::cerr << "Cache::newFD(" << fd << "," << pointer << "," << std::to_string((int)kind) << ")" << std::endl;
     //work around bug FD leak or bad FD stuff from this software I think
     if(FDList.find(fd)!=FDList.cend())
     {
